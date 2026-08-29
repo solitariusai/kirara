@@ -1,7 +1,7 @@
 [project]
 name = "kirara"
 version = "0.0.1"
-description = "JAX inference runtime with continuous batching and paged KV cache"
+description = "A minimal JAX-based inference runtime for LLMs."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
