@@ -1,9 +1,26 @@
+# Copyright 2026 Shinapri
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for Kirara's public API."""
+
 import unittest
 
 import jax
 import jax.numpy as jnp
 
-from kirara import LLM, Output, OutputSampling, SamplingParams, XLLM
+import kirara
+from kirara import LLM, SamplingParams
 
 
 class _Config:
@@ -12,11 +29,23 @@ class _Config:
     num_key_value_heads = 1
     hidden_size = 1
     head_dim = 1
+    max_position_embeddings = 64
     dtype = jnp.float32
 
 
-class _NativeModel:
+class _Tokenizer:
+    eos_token_id = None
+
+    def encode(self, text):
+        return [len(text), 2]
+
+    def decode(self, token_ids):
+        return " ".join(str(token) for token in token_ids)
+
+
+class _Model:
     config = _Config()
+    tokenizer = _Tokenizer()
     vocab_size = 64
 
     def paged_forward(
@@ -50,91 +79,65 @@ class _NativeModel:
         return logits, (key_pool, value_pool)
 
 
-class _ExternalModel:
-    def __init__(self):
-        self.calls = []
-
-    def generate(self, input_ids, sampling_params):
-        self.calls.append((input_ids, sampling_params))
-        return [
-            [row[-1] + offset for offset in range(1, 3)]
-            for row in input_ids
-        ]
-
-
-class _Tokenizer:
-    eos_token_id = 99
-
-    def decode(self, token_ids):
-        return " ".join(str(token) for token in token_ids)
-
-
 class PublicApiTest(unittest.TestCase):
-    def test_public_exports_are_distinct_model_paths(self):
-        self.assertIsNot(XLLM, LLM)
-        self.assertTrue(Output)
-        self.assertTrue(OutputSampling)
+    def test_public_api_is_small(self):
+        self.assertEqual(kirara.__all__, ["LLM", "SamplingParams"])
 
-    def test_native_model_uses_kirara_scheduler(self):
-        llm = LLM(_NativeModel(), max_seq_len=16)
-        result = llm([3, 4, 5], SamplingParams(max_new_tokens=2))
-
-        self.assertFalse(llm.uses_external_model)
-        self.assertIsNotNone(llm.scheduler)
-        self.assertEqual(result[0].output[0].token_ids, [6, 7])
-        self.assertEqual(llm.scheduler.prefill_model_invocations, 1)
-        self.assertEqual(llm.scheduler.decode_model_invocations, 1)
-
-    def test_external_model_uses_default_generator(self):
-        external = _ExternalModel()
+    def test_model_instance_generates_structured_outputs(self):
         llm = LLM(
-            XLLM(external),
-            tokenizer=_Tokenizer(),
-            tokenize_fn=lambda text: [len(text), 2],
+            _Model(),
+            model_impl="taktiny",
+            max_num_seqs=4,
+            max_model_len=64,
+            max_num_prefill_tokens=128,
         )
-        sampling = SamplingParams(max_new_tokens=2)
 
-        results = llm(["hi", "kirara"], sampling)
+        outputs = llm.generate(
+            ["hi", "kirara"],
+            SamplingParams(temperature=0, max_tokens=2),
+        )
 
-        self.assertTrue(llm.uses_external_model)
-        self.assertIsNone(llm.scheduler)
-        self.assertEqual(len(external.calls), 1)
-        self.assertEqual(external.calls[0], ([[2, 2], [6, 2]], sampling))
+        self.assertEqual([output.prompt for output in outputs], ["hi", "kirara"])
         self.assertEqual(
-            [result.output[0].token_ids for result in results],
+            [output.prompt_ids for output in outputs],
+            [[2, 2], [6, 2]],
+        )
+        self.assertEqual(
+            [output.output[0].token_ids for output in outputs],
             [[3, 4], [3, 4]],
         )
         self.assertEqual(
-            [result.output[0].text for result in results],
+            [output.output[0].text for output in outputs],
             ["3 4", "3 4"],
         )
+        self.assertEqual(llm.runner.prefill_model_invocations, 1)
+        self.assertEqual(llm.runner.decode_model_invocations, 1)
 
-    def test_external_model_can_use_explicit_adapter(self):
-        adapter = XLLM(
-            object(),
-            generate_fn=lambda rows, params: [
-                [params.max_new_tokens] for _ in rows
-            ],
-        )
-        result = LLM(adapter)(
-            [[3, 4], [5, 6]],
-            SamplingParams(max_new_tokens=7),
+    def test_non_multimodal_model_rejects_structured_image(self):
+        llm = LLM(
+            _Model(),
+            max_num_seqs=1,
+            max_model_len=64,
         )
 
-        self.assertEqual(
-            [item.output[0].token_ids for item in result],
-            [[7], [7]],
-        )
+        with self.assertRaisesRegex(ValueError, "multimodal"):
+            llm.generate(
+                [[
+                    {"type": "text", "text": "describe"},
+                    {"type": "image", "image": object()},
+                ]],
+                SamplingParams(temperature=0, max_tokens=1),
+            )
 
-    def test_invalid_native_model_is_rejected(self):
-        with self.assertRaisesRegex(TypeError, "must expose config"):
-            LLM(object())
+    def test_unknown_explicit_implementation_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unknown model implementation"):
+            LLM(_Model(), model_impl="missing")
 
-    def test_text_without_tokenizer_is_rejected(self):
-        llm = LLM(_NativeModel(), max_seq_len=16)
-
-        with self.assertRaisesRegex(ValueError, "tokenizer or tokenize_fn"):
-            llm("hello", SamplingParams(max_new_tokens=1))
+    def test_sampling_params_validate_runtime_values(self):
+        with self.assertRaises(ValueError):
+            SamplingParams(max_tokens=0)
+        with self.assertRaises(ValueError):
+            SamplingParams(top_p=0)
 
 
 if __name__ == "__main__":

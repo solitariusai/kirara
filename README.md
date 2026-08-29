@@ -1,55 +1,61 @@
 # Kirara
 
-Kirara is a JAX inference runtime with continuous batching and one
-authoritative paged KV cache. Model architectures are implemented with
-TakTiny, while cache and attention kernels are owned by Kirara.
+Kirara is a JAX-native inference runtime. It owns scheduling, persistent model
+state, bounded compilation, paged attention, sampling, and JAX sharding while
+model implementations remain in TakTiny, MaxText, or custom integrations.
 
-## Native Kirara model
-
-Pass a TakTiny-backed model directly to `LLM`. Generation uses Kirara's
-scheduler, paged cache, and kernels.
+## Public API
 
 ```python
 from kirara import LLM, SamplingParams
 
-llm = LLM(model, tokenizer=tokenizer)
-outputs = llm(
-    ["Hello", "Write a tiny Python function"],
-    SamplingParams(max_new_tokens=32),
+llm = LLM(
+    "HuggingFaceTB/SmolLM2-135M",
+    dtype="bfloat16",
+    mesh={"tp": 4},
+)
+
+outputs = llm.generate(
+    ["Hello!", "Explain JAX briefly."],
+    SamplingParams(temperature=0.7, max_tokens=64),
 )
 ```
 
-## External model
-
-Wrap an external implementation in `XLLM`, then pass the adapter to the same
-`LLM` interface. This path delegates to the external generator and does not
-use Kirara's scheduler or kernels.
+An existing model instance is also accepted when a registered integration can
+adapt it. An object that already implements Kirara's adapter contract is
+recognized directly and does not need to inherit from a Kirara class.
 
 ```python
-from kirara import LLM, SamplingParams, XLLM
-
-llm = LLM(XLLM(external_llm), tokenizer=tokenizer)
-outputs = llm("Hello", SamplingParams(max_new_tokens=32))
+llm = LLM(model_instance)
+embeddings = llm.encode(["hello", "world"])
 ```
 
-The default external contract is:
+Only `LLM` and `SamplingParams` are exported from the package root. Model
+loading, processing, scheduling, state allocation, and JIT bucket selection
+remain internal.
 
-```python
-external_llm.generate(
-    input_ids: list[list[int]],
-    sampling_params: SamplingParams,
-) -> list[list[int]]
-```
+Shared runtime annotations live in `kirara.types`. Domain types stay beside
+their owners—for example input parts in `inputs`, adapter contracts in
+`models`, and attention metadata in `attention`—so integrations can import
+precise contracts without expanding the package-root API.
 
-Pass `XLLM(external_llm, generate_fn=adapter)` when a library uses another
-calling convention. The adapter uses the same input and output contract.
+## Implemented runtime boundaries
 
-Pretokenized prompts are accepted as `list[int]` or `list[list[int]]`. Text
-prompts require a tokenizer or a `tokenize_fn` that accepts one string and
-returns one token-ID list.
+- registry-driven TakTiny and custom-model integrations;
+- unified `Adapter(Batch, State) -> ModelOutput` execution;
+- text and structured multimodal input normalization;
+- generation and encoder execution through one `Engine`;
+- `State` with attribute, mapping, and JAX pytree behavior;
+- authoritative paged KV state and lifecycle management;
+- scheduler-owned request decisions and Runner-owned JIT executables;
+- fixed decode compilation and bounded prefill/encoder buckets;
+- paged attention for MHA, GQA, and MQA;
+- JAX `Mesh`, logical-axis, and `NamedSharding` helpers;
+- request-specific sampling parameters.
 
-See [`api-graph/public-api.md`](api-graph/public-api.md) for module ownership
-and execution paths.
+Prefix caching, completed chunked-prefill scheduling, MaxText, Qwix, and
+optimized Pallas kernels remain future integrations. Unsupported requested
+features fail explicitly.
 
 ## Test
 
