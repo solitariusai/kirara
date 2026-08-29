@@ -19,6 +19,17 @@ from kirara.models.loader import LoadedModel
 
 
 def create_processor(loaded: LoadedModel) -> InputProcessor:
+    """Creates an input processor for a loaded TakTiny model.
+
+    Args:
+        loaded (LoadedModel): The loaded model wrapper.
+
+    Raises:
+        ValueError: If neither a processor nor tokenizer is available.
+
+    Returns:
+        InputProcessor: The created input processor.
+    """
     if loaded.processor is not None:
         return loaded.processor
     if loaded.tokenizer is None:

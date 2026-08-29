@@ -56,6 +56,8 @@ class Batch:
 
 @dataclass(frozen=True, slots=True)
 class Capabilities:
+    """Hardware and model capabilities supported by an adapter."""
+
     generate: bool = False
     encode: bool = False
     multimodal: bool = False
@@ -63,7 +65,9 @@ class Capabilities:
 
 
 @dataclass(frozen=True, slots=True)
-class ModelConfig:
+class Config:
+    """Base configuration parameters for a model."""
+
     num_layers: int = 0
     num_attention_heads: int = 0
     num_kv_heads: int = 0
@@ -73,7 +77,7 @@ class ModelConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class ModelStateSpec:
+class StateSpec:
     """Structural description of persistent model state."""
 
     kinds: tuple[str, ...] = ()
@@ -82,7 +86,9 @@ class ModelStateSpec:
 
 @jax.tree_util.register_pytree_node_class
 @dataclass
-class ModelOutput:
+class Output:
+    """Output from a model forward pass."""
+
     logits: jax.Array | None = None
     embeddings: jax.Array | None = None
     state: State | None = None
@@ -103,27 +109,29 @@ class ModelOutput:
 
 
 class Adapter(Protocol):
+    """Protocol for model adapters defining execution interface and properties."""
+
     @property
-    def config(self) -> ModelConfig: ...
+    def config(self) -> Config: ...
 
     @property
     def capabilities(self) -> Capabilities: ...
 
     @property
-    def state_spec(self) -> ModelStateSpec | None: ...
+    def state_spec(self) -> StateSpec | None: ...
 
     def __call__(
         self,
         batch: Batch,
         state: State | None = None,
-    ) -> ModelOutput: ...
+    ) -> Output: ...
 
 
 __all__ = [
     "Adapter",
     "Batch",
     "Capabilities",
-    "ModelConfig",
-    "ModelOutput",
-    "ModelStateSpec",
+    "Config",
+    "Output",
+    "StateSpec",
 ]

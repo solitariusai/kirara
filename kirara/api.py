@@ -64,33 +64,34 @@ class LLM:
         trust_remote_code: bool = False,
         **model_kwargs: Any,
     ) -> None:
-        """_summary_
+        """Initialize the LLM facade.
 
         Args:
-            model (ModelSource): _description_
-            model_impl (str, optional): _description_. Defaults to "auto".
-            tokenizer (str | None, optional): _description_. Defaults to None.
-            revision (str | None, optional): _description_. Defaults to None.
-            dtype (ModelDType, optional): _description_. Defaults to "bfloat16".
-            quantization (Any | None, optional): _description_. Defaults to None.
-            mesh (MeshSpec, optional): _description_. Defaults to None.
-            max_model_len (int | None, optional): _description_. Defaults to None.
-            max_num_seqs (int, optional): _description_. Defaults to 256.
-            max_num_batched_tokens (int | None, optional): _description_. Defaults to None.
-            max_num_prefill_tokens (int | None, optional): _description_. Defaults to None.
-            cache_dtype (CacheDType, optional): _description_. Defaults to "auto".
-            block_size (int, optional): _description_. Defaults to 16.
-            scheduler_policy (SchedulerPolicy, optional): _description_. Defaults to "fcfs".
-            attention_backend (AttentionBackend | str | None, optional): _description_. Defaults to None.
-            enable_prefix_caching (bool, optional): _description_. Defaults to False.
-            enable_chunked_prefill (bool, optional): _description_. Defaults to True.
-            trust_remote_code (bool, optional): _description_. Defaults to False.
+            model (ModelSource): The model source (e.g., Hugging Face model ID).
+            model_impl (str, optional): The model implementation to use. Defaults to "auto".
+            tokenizer (str | None, optional): The tokenizer name or path. Defaults to None.
+            revision (str | None, optional): The model revision. Defaults to None.
+            dtype (ModelDType, optional): The data type for the model weights. Defaults to "bfloat16".
+            quantization (Any | None, optional): Quantization config. Defaults to None.
+            mesh (MeshSpec, optional): Device mesh specification for sharding. Defaults to None.
+            max_model_len (int | None, optional): Maximum model context length. Defaults to None.
+            max_num_seqs (int, optional): Maximum number of sequences in a batch. Defaults to 256.
+            max_num_batched_tokens (int | None, optional): Maximum number of batched tokens. Defaults to None.
+            max_num_prefill_tokens (int | None, optional): Maximum number of prefill tokens. Defaults to None.
+            cache_dtype (CacheDType, optional): Data type for the KV cache. Defaults to "auto".
+            block_size (int, optional): Block size for paged attention. Defaults to 16.
+            scheduler_policy (SchedulerPolicy, optional): The scheduling policy. Defaults to "fcfs".
+            attention_backend (AttentionBackend | str | None, optional): Attention backend to use. Defaults to None.
+            enable_prefix_caching (bool, optional): Whether to enable prefix caching. Defaults to False.
+            enable_chunked_prefill (bool, optional): Whether to enable chunked prefill. Defaults to True.
+            trust_remote_code (bool, optional): Whether to trust remote code. Defaults to False.
+            **model_kwargs (Any): Additional keyword arguments for the model.
 
         Raises:
-            ValueError: _description_
-            ValueError: _description_
-            ValueError: _description_
-            ValueError: _description_
+            ValueError: If max_num_seqs is less than 1.
+            ValueError: If block_size is less than 1.
+            ValueError: If the model adapter exposes no executable capability.
+            ValueError: If max_model_len is less than 1.
         """
         if max_num_seqs < 1:
             raise ValueError("max_num_seqs must be positive")
@@ -170,10 +171,10 @@ class LLM:
 
     @property
     def model(self) -> Any:
-        """_summary_
+        """Get the underlying loaded model.
 
         Returns:
-            Any: _description_
+            Any: The loaded model instance.
         """
         return self.loaded_model.model
 
@@ -182,25 +183,25 @@ class LLM:
         inputs: GenerationInput,
         sampling_params: SamplingParams | None = None,
     ) -> list[Output]:
-        """_summary_
+        """Generate text from the given inputs.
 
         Args:
-            inputs (GenerationInput): _description_
-            sampling_params (SamplingParams | None, optional): _description_. Defaults to None.
+            inputs (GenerationInput): The inputs to generate from.
+            sampling_params (SamplingParams | None, optional): Sampling parameters for generation. Defaults to None.
 
         Returns:
-            list[Output]: _description_
+            list[Output]: A list of generation outputs.
         """
         return self.engine.generate(inputs, sampling_params)
 
     def encode(self, inputs: GenerationInput) -> jax.Array:
-        """_summary_
+        """Encode the inputs into embeddings.
 
         Args:
-            inputs (GenerationInput): _description_
+            inputs (GenerationInput): The inputs to encode.
 
         Returns:
-            jax.Array: _description_
+            jax.Array: The resulting embeddings.
         """
         return self.engine.encode(inputs)
 
@@ -212,20 +213,20 @@ class LLM:
         cache_dtype: CacheDType,
         block_size: int,
     ) -> StateManager:
-        """_summary_
+        """Create a state manager for the KV cache.
 
         Args:
-            max_num_seqs (int): _description_
-            max_model_len (int): _description_
-            cache_dtype (CacheDType): _description_
-            block_size (int): _description_
+            max_num_seqs (int): Maximum number of sequences.
+            max_model_len (int): Maximum model length.
+            cache_dtype (CacheDType): Data type for the cache.
+            block_size (int): Block size for paged attention.
 
         Raises:
-            ValueError: _description_
-            ValueError: _description_
+            ValueError: If the adapter requires layer, KV-head, and head sizes but they are invalid.
+            ValueError: If the cache dtype is unsupported.
 
         Returns:
-            StateManager: _description_
+            StateManager: The created state manager.
         """
         state_spec = self.adapter.state_spec
         if state_spec is None or "kv" not in state_spec.kinds:
@@ -260,18 +261,18 @@ class LLM:
         backend: AttentionBackend | str | None,
         block_size: int,
     ) -> AttentionBackend:
-        """_summary_
+        """Resolve the attention backend.
 
         Args:
-            backend (AttentionBackend | str | None): _description_
-            block_size (int): _description_
+            backend (AttentionBackend | str | None): The attention backend to use.
+            block_size (int): The block size.
 
         Raises:
-            ValueError: _description_
-            TypeError: _description_
+            ValueError: If the backend string is unknown.
+            TypeError: If the attention backend is not callable.
 
         Returns:
-            AttentionBackend: _description_
+            AttentionBackend: The resolved attention backend.
         """
         if backend is None or backend == "paged":
             return PagedAttention(block_size)
@@ -283,13 +284,13 @@ class LLM:
 
     @staticmethod
     def _prefill_buckets(max_model_len: int) -> tuple[int, ...]:
-        """_summary_
+        """Calculate the prefill buckets based on max model length.
 
         Args:
-            max_model_len (int): _description_
+            max_model_len (int): Maximum model length.
 
         Returns:
-            tuple[int, ...]: _description_
+            tuple[int, ...]: A sorted tuple of bucket sizes.
         """
         buckets: list[int] = []
         bucket = 16

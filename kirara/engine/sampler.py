@@ -26,6 +26,11 @@ class Sampler:
     """Convert model logits to request-specific token IDs."""
 
     def __init__(self, seed: int = 0) -> None:
+        """Initialize the sampler with a random seed.
+
+        Args:
+            seed (int, optional): Random seed for reproducibility. Defaults to 0.
+        """
         self.seed = seed
 
     def sample(
@@ -35,6 +40,17 @@ class Sampler:
         params: list[SamplingParams],
         steps: list[int],
     ) -> list[int]:
+        """Sample token IDs from the given logits for a batch of requests.
+
+        Args:
+            logits (jax.Array): The model output logits to sample from.
+            rows (list[int]): The row indices corresponding to each request in the logits array.
+            params (list[SamplingParams]): Sampling configuration for each request.
+            steps (list[int]): The current generation step for each request, used for PRNG folding.
+
+        Returns:
+            list[int]: The sampled token IDs, one for each request.
+        """
         tokens: list[int] = []
         for row, sampling, step in zip(rows, params, steps, strict=True):
             row_logits = logits[row]

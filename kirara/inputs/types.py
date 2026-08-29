@@ -23,6 +23,8 @@ from kirara.types import Metadata
 
 
 class _InputPayload(TypedDict, total=False):
+    """Optional payload fields for an input part."""
+
     text: str
     image: Any
     audio: Any
@@ -41,6 +43,8 @@ type GenerationInput = PromptInput | list[str] | list[list[InputPart]]
 
 @dataclass(slots=True)
 class NormalizedInput:
+    """Normalized generation input containing resolved tokens and extracted modalities."""
+    
     input_ids: list[int]
     prompt: str = ""
     modalities: Metadata = field(default_factory=dict)

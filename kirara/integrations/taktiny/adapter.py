@@ -26,9 +26,9 @@ from kirara.attention import AttentionBackend
 from kirara.models.base import (
     Batch,
     Capabilities,
-    ModelConfig,
-    ModelOutput,
-    ModelStateSpec,
+    Config,
+    Output,
+    StateSpec,
 )
 from kirara.state import PagedKVState, State, write_paged_kv
 
@@ -42,6 +42,16 @@ class TakTinyModelRunner:
         block_size: int,
         attention_backend: AttentionBackend,
     ) -> None:
+        """Initializes the runner for a TakTiny model.
+
+        Args:
+            model (Any): The TakTiny model instance.
+            block_size (int): The paged KV block size.
+            attention_backend (AttentionBackend): The attention backend implementation.
+
+        Raises:
+            TypeError: If the model is not a valid TakTiny causal LM.
+        """
         self.model = model
         self.block_size = block_size
         self.attention_backend = attention_backend
@@ -66,6 +76,24 @@ class TakTinyModelRunner:
         value_pool: jax.Array,
         logit_indices: jax.Array,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+        """Executes the model forward pass using the paged KV cache.
+
+        Args:
+            input_ids (jax.Array): Input token IDs.
+            position_ids (jax.Array): Token position IDs.
+            token_active (jax.Array): Boolean mask of active tokens.
+            block_table (jax.Array): Paged KV block table.
+            sequence_lengths (jax.Array): Length of each sequence.
+            key_pool (jax.Array): Paged key cache pool.
+            value_pool (jax.Array): Paged value cache pool.
+            logit_indices (jax.Array): Indices to extract logits for.
+
+        Raises:
+            NotImplementedError: If sliding-window attention is configured.
+
+        Returns:
+            tuple[jax.Array, tuple[jax.Array, jax.Array]]: The extracted logits and updated (key_pool, value_pool).
+        """
         if self._custom_forward is not None:
             return self._custom_forward(
                 input_ids=input_ids,
@@ -84,6 +112,20 @@ class TakTinyModelRunner:
         position_embedding = transformer._position_embeddings(x, position_ids)
 
         def forward(layer, hidden_states, layer_cache, layer_idx):
+            """Forward pass for a single transformer layer.
+
+            Args:
+                layer (Any): The transformer layer module.
+                hidden_states (jax.Array): The input hidden states.
+                layer_cache (tuple[jax.Array, jax.Array]): Layer specific (key, value) pools.
+                layer_idx (int): The index of the layer.
+
+            Raises:
+                NotImplementedError: If sliding window attention is configured.
+
+            Returns:
+                tuple[jax.Array, tuple[jax.Array, jax.Array]]: Updated hidden states and layer cache.
+            """
             del layer_idx
             layer_key_pool, layer_value_pool = layer_cache
             residual = hidden_states
@@ -178,6 +220,16 @@ class TakTinyAdapter:
         attention_backend: AttentionBackend,
         block_size: int,
     ) -> None:
+        """Initializes the adapter for a TakTiny model.
+
+        Args:
+            model (Any): The TakTiny model instance.
+            attention_backend (AttentionBackend): The attention backend to use.
+            block_size (int): The paged KV block size.
+
+        Raises:
+            TypeError: If the model lacks a configuration object.
+        """
         source_config = getattr(
             model,
             "config",
@@ -193,7 +245,7 @@ class TakTinyAdapter:
         head_dim = getattr(source_config, "head_dim", None)
         if head_dim is None and attention_heads:
             head_dim = getattr(source_config, "hidden_size", 0) // attention_heads
-        self._config = ModelConfig(
+        self._config = Config(
             num_layers=getattr(source_config, "num_hidden_layers", 0),
             num_attention_heads=attention_heads,
             num_kv_heads=kv_heads,
@@ -210,7 +262,7 @@ class TakTinyAdapter:
             ),
         )
         self._capabilities = Capabilities(generate=True, stateful=True)
-        self._state_spec = ModelStateSpec(kinds=("kv",))
+        self._state_spec = StateSpec(kinds=("kv",))
         self._runner = TakTinyModelRunner(
             model,
             block_size,
@@ -218,22 +270,52 @@ class TakTinyAdapter:
         )
 
     @property
-    def config(self) -> ModelConfig:
+    def config(self) -> Config:
+        """Model configuration.
+
+        Returns:
+            Config: The configuration object.
+        """
         return self._config
 
     @property
     def capabilities(self) -> Capabilities:
+        """Adapter capabilities.
+
+        Returns:
+            Capabilities: The capabilities object.
+        """
         return self._capabilities
 
     @property
-    def state_spec(self) -> ModelStateSpec:
+    def state_spec(self) -> StateSpec:
+        """State specification.
+
+        Returns:
+            StateSpec: The state spec object.
+        """
         return self._state_spec
 
     def __call__(
         self,
         batch: Batch,
         state: State | None = None,
-    ) -> ModelOutput:
+    ) -> Output:
+        """Executes a single generation step.
+
+        Args:
+            batch (Batch): The batched input data.
+            state (State | None, optional): The current model state. Defaults to None.
+
+        Raises:
+            ValueError: If token or position arrays are missing.
+            ValueError: If an active mask is missing.
+            ValueError: If paged KV state is missing.
+            ValueError: If logit_indices are missing from batch metadata.
+
+        Returns:
+            Output: The generation output and updated state.
+        """
         if batch.input_ids is None or batch.positions is None:
             raise ValueError("TakTiny generation requires token and position arrays")
         if batch.active_mask is None:
@@ -261,7 +343,7 @@ class TakTinyAdapter:
             block_table=kv.block_table,
             sequence_lengths=kv.sequence_lengths,
         )
-        return ModelOutput(logits=logits, state=State(**values))
+        return Output(logits=logits, state=State(**values))
 
 
 __all__ = ["TakTinyAdapter", "TakTinyModelRunner"]

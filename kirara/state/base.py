@@ -30,18 +30,47 @@ class State(Mapping[str, Any]):
         self._values = dict(values)
 
     def __getattr__(self, name: str) -> Any:
+        """Get an item from the state using attribute access.
+
+        Args:
+            name (str): The name of the state item to retrieve.
+
+        Raises:
+            AttributeError: If the requested state item does not exist.
+
+        Returns:
+            Any: The value of the requested state item.
+        """
         try:
             return self._values[name]
         except KeyError as error:
             raise AttributeError(name) from error
 
     def __getitem__(self, name: str) -> Any:
+        """Get an item from the state using mapping access.
+
+        Args:
+            name (str): The name of the state item to retrieve.
+
+        Returns:
+            Any: The value of the requested state item.
+        """
         return self._values[name]
 
     def __iter__(self) -> Iterator[str]:
+        """Iterate over the keys in the state.
+
+        Yields:
+            Iterator[str]: An iterator over the state keys.
+        """
         return iter(self._values)
 
     def __len__(self) -> int:
+        """Get the number of items in the state.
+
+        Returns:
+            int: The number of state items.
+        """
         return len(self._values)
 
     def tree_flatten(self):

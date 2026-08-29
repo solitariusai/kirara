@@ -26,6 +26,14 @@ class AxisRules:
     rules: tuple[tuple[str, str | None], ...] = ()
 
     def mesh_axis(self, logical_axis: str) -> str | None:
+        """Get the corresponding mesh axis for a logical axis.
+
+        Args:
+            logical_axis: The name of the logical axis.
+
+        Returns:
+            The mesh axis name, or None if not mapped.
+        """
         for name, mesh_axis in self.rules:
             if name == logical_axis:
                 return mesh_axis

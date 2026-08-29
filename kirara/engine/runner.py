@@ -22,11 +22,11 @@ import jax
 from jax.sharding import Mesh
 
 from kirara.attention import AttentionBackend
-from kirara.models import Adapter, Batch, ModelOutput
+from kirara.models import Adapter, Batch, Output
 from kirara.state import State, StateManager
 from kirara.types import ExecutionPhase
 
-type ModelStep = Callable[[Batch, State], ModelOutput]
+type ModelStep = Callable[[Batch, State], Output]
 
 
 class Runner:
@@ -40,6 +40,18 @@ class Runner:
         mesh: Mesh | None,
         prefill_buckets: tuple[int, ...],
     ) -> None:
+        """Initialize the runner with a model and state.
+
+        Args:
+            model (Adapter): The model adapter to execute.
+            state_manager (StateManager): The state manager for tracking KV cache and other state.
+            attention_backend (AttentionBackend): The attention backend to use.
+            mesh (Mesh | None): The JAX mesh to shard over, or None for no sharding.
+            prefill_buckets (tuple[int, ...]): Allowed prompt lengths for prefill batching.
+
+        Raises:
+            ValueError: If prefill_buckets is empty or contains non-positive lengths.
+        """
         self.model = model
         self.state_manager = state_manager
         self.attention_backend = attention_backend
@@ -61,6 +73,18 @@ class Runner:
         self.decode_compiled = False
 
     def bucket_for_length(self, length: int) -> int:
+        """Find the smallest prefill bucket that can fit the given length.
+
+        Args:
+            length (int): The sequence length to bucket.
+
+        Raises:
+            ValueError: If length is not positive.
+            ValueError: If length exceeds the largest configured bucket.
+
+        Returns:
+            int: The size of the matched bucket.
+        """
         if length < 1:
             raise ValueError("input length must be positive")
         for bucket in self.prefill_buckets:
@@ -73,13 +97,30 @@ class Runner:
 
     @property
     def compiled_executable_count(self) -> int:
+        """Get the total number of JAX executables compiled so far.
+
+        Returns:
+            int: The count of compiled prefill, decode, and encode steps.
+        """
         return (
             len(self.compiled_prefill_buckets)
             + int(self.decode_compiled)
             + len(self._encode_steps)
         )
 
-    def execute(self, batch: Batch, *, phase: ExecutionPhase) -> ModelOutput:
+    def execute(self, batch: Batch, *, phase: ExecutionPhase) -> Output:
+        """Execute a model step for the given batch and phase.
+
+        Args:
+            batch (Batch): The batched inputs and metadata.
+            phase (ExecutionPhase): The phase of execution ('prefill', 'decode', 'encode').
+
+        Raises:
+            ValueError: If an unknown execution phase is provided.
+
+        Returns:
+            Output: The model outputs including logits and updated state.
+        """
         state = self.state_manager.state
         if phase == "prefill":
             bucket = batch.input_ids.shape[1]
@@ -110,7 +151,16 @@ class Runner:
             self.state_manager.update(output.state)
         return output
 
-    def _call_model(self, batch: Batch, state: State) -> ModelOutput:
+    def _call_model(self, batch: Batch, state: State) -> Output:
+        """Call the underlying model adapter with the batch and state.
+
+        Args:
+            batch (Batch): The input batch to process.
+            state (State): The current model state.
+
+        Returns:
+            Output: The resulting model output.
+        """
         return self.model(batch, state)
 
 

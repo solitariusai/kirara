@@ -22,28 +22,66 @@ from kirara.inputs.types import GenerationInput, InputPart, NormalizedInput
 
 
 class InputProcessor(Protocol):
-    def __call__(self, inputs: GenerationInput) -> list[NormalizedInput]: ...
+    """Protocol for normalizing input text and modalities into token IDs."""
 
-    def decode(self, token_ids: list[int]) -> str: ...
+    def __call__(self, inputs: GenerationInput) -> list[NormalizedInput]:
+        """Normalizes raw generation inputs into token sequences and metadata."""
+        ...
+
+    def decode(self, token_ids: list[int]) -> str:
+        """Decodes a sequence of token IDs back into a string."""
+        ...
 
 
 class TokenizerInputProcessor:
     """Tokenizer-backed text processor with structured modality passthrough."""
 
     def __init__(self, tokenizer: Any) -> None:
+        """Initializes the processor with a tokenizer.
+
+        Args:
+            tokenizer (Any): The underlying tokenizer object.
+        """
         self.tokenizer = tokenizer
 
     def __call__(self, inputs: GenerationInput) -> list[NormalizedInput]:
+        """Processes text or structured generation inputs into normalized representations.
+
+        Args:
+            inputs (GenerationInput): The raw text or structured inputs.
+
+        Returns:
+            list[NormalizedInput]: The normalized inputs ready for generation.
+        """
         rows = self._rows(inputs)
         return [self._normalize(row) for row in rows]
 
     def decode(self, token_ids: list[int]) -> str:
+        """Decodes token IDs to text using the underlying tokenizer.
+
+        Args:
+            token_ids (list[int]): Sequence of token IDs.
+
+        Returns:
+            str: Decoded text string.
+        """
         decode = getattr(self.tokenizer, "decode", None)
         if not callable(decode):
             return ""
         return str(decode(token_ids))
 
     def _normalize(self, row: str | list[InputPart]) -> NormalizedInput:
+        """Normalizes a single row of input into a NormalizedInput.
+
+        Args:
+            row (str | list[InputPart]): A single input row (string or parts).
+
+        Raises:
+            ValueError: If an input part lacks a string type.
+
+        Returns:
+            NormalizedInput: The normalized input object.
+        """
         if isinstance(row, str):
             return NormalizedInput(
                 input_ids=self._encode(row),
@@ -70,6 +108,17 @@ class TokenizerInputProcessor:
         )
 
     def _encode(self, text: str) -> list[int]:
+        """Encodes text into a list of token IDs.
+
+        Args:
+            text (str): The text to encode.
+
+        Raises:
+            TypeError: If the tokenizer is not callable or lacks encode method.
+
+        Returns:
+            list[int]: The sequence of token IDs.
+        """
         encode = getattr(self.tokenizer, "encode", None)
         if callable(encode):
             result = encode(text)
@@ -83,6 +132,18 @@ class TokenizerInputProcessor:
     def _rows(
         inputs: GenerationInput,
     ) -> list[str | list[InputPart]]:
+        """Extracts rows from GenerationInput.
+
+        Args:
+            inputs (GenerationInput): The raw inputs.
+
+        Raises:
+            TypeError: If inputs is not properly formatted text or structured input.
+            TypeError: If structured inputs are not list[list[dict]].
+
+        Returns:
+            list[str | list[InputPart]]: A uniform list of rows.
+        """
         if isinstance(inputs, str):
             return [inputs]
         if not isinstance(inputs, list):
@@ -103,6 +164,18 @@ class TokenizerInputProcessor:
 
 
 def _extract_token_ids(result: Any) -> list[int]:
+    """Extracts a flat list of token IDs from tokenizer output.
+
+    Args:
+        result (Any): The output from the tokenizer.
+
+    Raises:
+        TypeError: If the output cannot be coerced to a flat 1D list of ints.
+        ValueError: If the processed output is empty.
+
+    Returns:
+        list[int]: The token IDs.
+    """
     input_ids = getattr(result, "input_ids", None)
     if input_ids is None and isinstance(result, dict):
         input_ids = result.get("input_ids")

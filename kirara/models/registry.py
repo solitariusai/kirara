@@ -23,7 +23,7 @@ from typing import TypedDict
 from kirara.attention import AttentionBackend
 from kirara.inputs import InputProcessor
 from kirara.models.base import Adapter
-from kirara.models.loader import LoadedModel, ModelLoader
+from kirara.models.loader import LoadedModel, Loader
 from kirara.types import ModelSource
 
 
@@ -41,7 +41,9 @@ type ModelDetector = Callable[[ModelSource], bool]
 
 @dataclass(frozen=True, slots=True)
 class ModelIntegration:
-    loader: ModelLoader
+    """Integration definition for a specific model architecture."""
+
+    loader: Loader
     adapter: AdapterFactory
     processor: ProcessorFactory
     detect: ModelDetector
@@ -58,12 +60,25 @@ class ModelRegistry:
         self,
         name: str,
         *,
-        loader: ModelLoader,
+        loader: Loader,
         adapter: AdapterFactory,
         processor: ProcessorFactory,
         detect: ModelDetector,
         default_for_repositories: bool = False,
     ) -> None:
+        """Register a new model integration.
+
+        Args:
+            name: Unique name for the model integration.
+            loader: Model loading implementation.
+            adapter: Factory for creating the model adapter.
+            processor: Factory for creating the input processor.
+            detect: Function to detect if a source is supported.
+            default_for_repositories: Whether this is the default fallback.
+
+        Raises:
+            ValueError: If the integration name is empty.
+        """
         if not name:
             raise ValueError("integration name cannot be empty")
         self._integrations[name] = ModelIntegration(
@@ -79,6 +94,19 @@ class ModelRegistry:
         source: ModelSource,
         model_impl: str = "auto",
     ) -> ModelIntegration:
+        """Resolve a model integration for a given source.
+
+        Args:
+            source: Source identifier for the model.
+            model_impl: Specific implementation name, or "auto" to detect.
+
+        Raises:
+            ValueError: If the specified implementation is unknown.
+            ValueError: If no registered integration accepts the source.
+
+        Returns:
+            ModelIntegration: The resolved model integration.
+        """
         if model_impl != "auto":
             try:
                 return self._integrations[model_impl]
@@ -106,8 +134,8 @@ model_registry = ModelRegistry()
 
 
 __all__ = [
-    "AdapterRuntime",
     "AdapterFactory",
+    "AdapterRuntime",
     "ModelDetector",
     "ModelIntegration",
     "ModelRegistry",

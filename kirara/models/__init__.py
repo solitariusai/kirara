@@ -18,11 +18,11 @@ from kirara.models.base import (
     Adapter,
     Batch,
     Capabilities,
-    ModelConfig,
-    ModelOutput,
-    ModelStateSpec,
+    Config,
+    Output,
+    StateSpec,
 )
-from kirara.models.loader import LoadedModel, ModelLoader
+from kirara.models.loader import LoadedModel, Loader
 from kirara.models.registry import (
     AdapterRuntime,
     ModelRegistry,
@@ -34,11 +34,11 @@ __all__ = [
     "AdapterRuntime",
     "Batch",
     "Capabilities",
+    "Config",
     "LoadedModel",
-    "ModelConfig",
-    "ModelLoader",
-    "ModelOutput",
+    "Loader",
     "ModelRegistry",
-    "ModelStateSpec",
+    "Output",
+    "StateSpec",
     "model_registry",
 ]

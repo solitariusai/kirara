@@ -24,22 +24,46 @@ from kirara.state.base import State
 
 
 class _AttentionOptions(TypedDict, total=False):
+    """Optional configuration for attention backends.
+
+    Args:
+        scale (float | jax.Array | None): The attention scale factor.
+        softcap (float | jax.Array | None): Softcapping threshold for attention logits.
+    """
     scale: float | jax.Array | None
     softcap: float | jax.Array | None
 
 
 class AttentionMetadata(_AttentionOptions):
+    """Metadata required by the attention backend for a given execution step.
+
+    Args:
+        query_positions (jax.Array): The sequence positions of the query tokens.
+        query_active (jax.Array): Boolean mask indicating active queries.
+    """
     query_positions: jax.Array
     query_active: jax.Array
 
 
 class AttentionBackend(Protocol):
+    """Protocol defining the interface for attention backends."""
     def __call__(
         self,
         query: jax.Array,
         state: State,
         metadata: AttentionMetadata,
-    ) -> jax.Array: ...
+    ) -> jax.Array:
+        """Compute attention for a query over the provided state.
+
+        Args:
+            query (jax.Array): The input query tensor.
+            state (State): The model state containing KV cache.
+            metadata (AttentionMetadata): Auxiliary information for the attention step.
+
+        Returns:
+            jax.Array: The attention output tensor.
+        """
+        ...
 
 
 __all__ = ["AttentionBackend", "AttentionMetadata"]

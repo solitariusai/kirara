@@ -19,7 +19,6 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
-import jax
 import jax.numpy as jnp
 
 from kirara.engine.request import Request, RequestStatus
@@ -50,6 +49,27 @@ class Scheduler:
         enable_chunked_prefill: bool = True,
         enable_prefix_caching: bool = False,
     ) -> None:
+        """Initialize the scheduler for managing request lifecycles.
+
+        Args:
+            runner (Runner): The execution runner.
+            state_manager (StateManager): State manager for tracking sequence contexts.
+            sampler (Sampler): Token sampler.
+            max_num_seqs (int): Maximum number of concurrent sequences.
+            max_model_len (int): Maximum allowed sequence length.
+            max_num_batched_tokens (int | None, optional): Maximum tokens per batch. Defaults to max_model_len.
+            max_num_prefill_tokens (int | None, optional): Maximum tokens per prefill batch. Defaults to max_num_batched_tokens.
+            tokenizer (Any, optional): Tokenizer for resolving stop tokens. Defaults to None.
+            policy (SchedulerPolicy, optional): Scheduling policy. Defaults to "fcfs".
+            enable_chunked_prefill (bool, optional): Whether to enable chunked prefill. Defaults to True.
+            enable_prefix_caching (bool, optional): Whether to enable prefix caching. Defaults to False.
+
+        Raises:
+            ValueError: If policy is not 'fcfs'.
+            NotImplementedError: If prefix caching is enabled (not implemented).
+            ValueError: If max_num_batched_tokens is not positive.
+            ValueError: If max_num_prefill_tokens is not positive.
+        """
         if policy != "fcfs":
             raise ValueError("only fcfs scheduling is implemented")
         if enable_prefix_caching:
@@ -82,37 +102,85 @@ class Scheduler:
 
     @property
     def cache_manager(self):
+        """Get the paged cache manager from the state manager.
+
+        Returns:
+            PagedCache: The cache manager instance.
+        """
         return self.state_manager.paged_cache
 
     @property
     def prefill_model_invocations(self) -> int:
+        """Get the total number of prefill model executions.
+
+        Returns:
+            int: The number of invocations.
+        """
         return self.runner.prefill_model_invocations
 
     @property
     def prefill_bucket_history(self) -> list[int]:
+        """Get the history of prefill bucket sizes used.
+
+        Returns:
+            list[int]: The list of bucket sizes.
+        """
         return self.runner.prefill_bucket_history
 
     @property
     def compiled_prefill_buckets(self) -> set[int]:
+        """Get the set of compiled prefill bucket sizes.
+
+        Returns:
+            set[int]: The compiled bucket sizes.
+        """
         return self.runner.compiled_prefill_buckets
 
     @property
     def decode_model_invocations(self) -> int:
+        """Get the total number of decode model executions.
+
+        Returns:
+            int: The number of invocations.
+        """
         return self.runner.decode_model_invocations
 
     @property
     def decode_compiled(self) -> bool:
+        """Check if the decode step has been compiled.
+
+        Returns:
+            bool: True if compiled, False otherwise.
+        """
         return self.runner.decode_compiled
 
     @property
     def compiled_executable_count(self) -> int:
+        """Get the total number of compiled JAX executables.
+
+        Returns:
+            int: The total count.
+        """
         return self.runner.compiled_executable_count
 
     @property
     def _compiled_prefill_steps(self):
+        """Get the cached prefill steps.
+
+        Returns:
+            dict: Mapping of bucket sizes to executable prefill steps.
+        """
         return self.runner._prefill_steps
 
     def _get_bucket_for_len(self, length: int) -> int:
+        """Get the appropriate prefill bucket size for a given sequence length.
+
+        Args:
+            length (int): The sequence length.
+
+        Returns:
+            int: The bucket size.
+        """
         return self.runner.bucket_for_length(length)
 
     def add_request(
@@ -120,6 +188,15 @@ class Scheduler:
         inputs: NormalizedInput | list[int],
         sampling_params: SamplingParams | None = None,
     ) -> Request:
+        """Add a new request to the scheduler queue.
+
+        Args:
+            inputs (NormalizedInput | list[int]): The input tokens or normalized input.
+            sampling_params (SamplingParams | None, optional): The sampling configuration. Defaults to None.
+
+        Returns:
+            Request: The constructed request object.
+        """
         normalized = (
             inputs
             if isinstance(inputs, NormalizedInput)
@@ -136,6 +213,11 @@ class Scheduler:
         return request
 
     def step(self) -> bool:
+        """Execute one scheduling step, running prefill or decode batches as needed.
+
+        Returns:
+            bool: True if there are still active or queued requests, False otherwise.
+        """
         prefill_requests = self._admit_prefill()
         prefill_tokens = sum(
             request.prompt_length for request in prefill_requests
@@ -171,6 +253,15 @@ class Scheduler:
         inputs: list[NormalizedInput] | list[list[int]],
         sampling_params: SamplingParams | None = None,
     ) -> list[list[int]]:
+        """Synchronously generate tokens for a batch of inputs until completion.
+
+        Args:
+            inputs (list[NormalizedInput] | list[list[int]]): The inputs to process.
+            sampling_params (SamplingParams | None, optional): The sampling configuration. Defaults to None.
+
+        Returns:
+            list[list[int]]: The generated token sequences for each input.
+        """
         requests = [
             self.add_request(item, sampling_params)
             for item in inputs
@@ -180,6 +271,15 @@ class Scheduler:
         return [request.generated_tokens for request in requests]
 
     def _admit_prefill(self) -> list[Request]:
+        """Admit queued requests for the prefill phase based on budget.
+
+        Raises:
+            ValueError: If a prompt exceeds the token budget without chunked prefill enabled.
+            NotImplementedError: If chunked prefill is required but not yet implemented.
+
+        Returns:
+            list[Request]: The list of requests admitted for prefill.
+        """
         admitted: list[Request] = []
         total_tokens = 0
         prefill_budget = min(
@@ -212,6 +312,14 @@ class Scheduler:
         return admitted
 
     def _run_batched_prefill(self, requests: list[Request]) -> None:
+        """Execute a batched prefill step for the given requests.
+
+        Args:
+            requests (list[Request]): The requests to prefill.
+
+        Raises:
+            RuntimeError: If the generation adapter does not return logits.
+        """
         max_prompt_length = max(request.prompt_length for request in requests)
         bucket = self._get_bucket_for_len(max_prompt_length)
         shape = (self.max_num_seqs, bucket)
@@ -260,6 +368,14 @@ class Scheduler:
             request.status = RequestStatus.DECODING
 
     def _run_decode(self, active_slots: list[int]) -> None:
+        """Execute a batched decode step for the given active slots.
+
+        Args:
+            active_slots (list[int]): The slot indices of active decoding requests.
+
+        Raises:
+            RuntimeError: If the generation adapter does not return logits.
+        """
         input_ids = jnp.zeros((self.max_num_seqs, 1), dtype=jnp.int32)
         positions = jnp.zeros((self.max_num_seqs, 1), dtype=jnp.int32)
         active_mask = jnp.zeros((self.max_num_seqs, 1), dtype=jnp.bool_)
@@ -308,6 +424,11 @@ class Scheduler:
             request.position += 1
 
     def _retire_finished(self, requests: list[Request]) -> None:
+        """Retire and clean up resources for finished requests.
+
+        Args:
+            requests (list[Request]): The requests to check and retire.
+        """
         for request in requests:
             if not self._is_finished(request):
                 continue
@@ -317,6 +438,14 @@ class Scheduler:
             self.slots[slot_id] = None
 
     def _is_finished(self, request: Request) -> bool:
+        """Check if a request has finished generation.
+
+        Args:
+            request (Request): The request to check.
+
+        Returns:
+            bool: True if generation is complete, False otherwise.
+        """
         if len(request.generated_tokens) >= request.sampling_params.max_tokens:
             return True
         if not request.generated_tokens:
@@ -329,6 +458,17 @@ class Scheduler:
 
     @staticmethod
     def _slot_id(request: Request) -> int:
+        """Retrieve the slot ID for a request.
+
+        Args:
+            request (Request): The request to inspect.
+
+        Raises:
+            RuntimeError: If the request has no assigned slot.
+
+        Returns:
+            int: The slot ID.
+        """
         if request.slot_id is None:
             raise RuntimeError("request has no assigned slot")
         return request.slot_id

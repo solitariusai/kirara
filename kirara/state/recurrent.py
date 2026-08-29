@@ -24,6 +24,8 @@ import jax
 @jax.tree_util.register_pytree_node_class
 @dataclass
 class RecurrentState:
+    """Persistent state representation for recurrent or convolution layers."""
+    
     recurrent: jax.Array | None = None
     convolution: jax.Array | None = None
 

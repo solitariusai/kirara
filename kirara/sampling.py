@@ -32,6 +32,14 @@ class SamplingParams:
     seed: int | None = None
 
     def __post_init__(self) -> None:
+        """Validate the sampling parameters.
+
+        Raises:
+            ValueError: If temperature is negative.
+            ValueError: If top_p is not in (0, 1].
+            ValueError: If top_k is negative.
+            ValueError: If max_tokens is less than 1.
+        """
         if self.temperature < 0:
             raise ValueError("temperature cannot be negative")
         if not 0 < self.top_p <= 1:

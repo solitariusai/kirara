@@ -27,7 +27,22 @@ from kirara.types import ModelSource
 
 
 class CustomLoader:
+    """Loader for models that already implement Kirara's adapter contract."""
+
     def load(self, source: ModelSource, **kwargs: Any) -> LoadedModel:
+        """Wraps a native model instance in a LoadedModel.
+
+        Args:
+            source (ModelSource): The model instance.
+            **kwargs: Extra loader arguments.
+
+        Raises:
+            TypeError: If the source is not a model instance.
+            ValueError: If model_kwargs is provided.
+
+        Returns:
+            LoadedModel: The wrapped model instance.
+        """
         if isinstance(source, str):
             raise TypeError("custom integration requires a model instance")
         model_kwargs = kwargs.get("model_kwargs") or {}
@@ -43,6 +58,14 @@ class CustomLoader:
 
 
 def _detect(source: ModelSource) -> bool:
+    """Detects if a source object natively implements the adapter contract.
+
+    Args:
+        source (ModelSource): The source object to inspect.
+
+    Returns:
+        bool: True if it exposes the required adapter properties.
+    """
     if isinstance(source, str):
         return False
     required = ("config", "capabilities", "state_spec")
@@ -54,11 +77,32 @@ def _adapter(
     attention_backend: AttentionBackend,
     runtime: AdapterRuntime,
 ) -> Adapter:
+    """Returns the underlying model instance as its own adapter.
+
+    Args:
+        loaded (LoadedModel): The loaded model wrapper.
+        attention_backend (AttentionBackend): The configured attention backend.
+        runtime (AdapterRuntime): The adapter runtime.
+
+    Returns:
+        Adapter: The adapter instance.
+    """
     del attention_backend, runtime
     return loaded.model
 
 
 def _processor(loaded: LoadedModel) -> InputProcessor:
+    """Resolves the input processor for a custom model.
+
+    Args:
+        loaded (LoadedModel): The loaded model wrapper.
+
+    Raises:
+        ValueError: If neither a processor nor tokenizer is available.
+
+    Returns:
+        InputProcessor: The resolved processor.
+    """
     if loaded.processor is not None:
         return loaded.processor
     if loaded.tokenizer is not None:
@@ -67,6 +111,11 @@ def _processor(loaded: LoadedModel) -> InputProcessor:
 
 
 def register(registry: ModelRegistry) -> None:
+    """Registers the custom integration with the provided model registry.
+
+    Args:
+        registry (ModelRegistry): The registry to register with.
+    """
     registry.register(
         "custom",
         loader=CustomLoader(),

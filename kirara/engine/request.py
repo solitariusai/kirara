@@ -24,6 +24,8 @@ from kirara.sampling import SamplingParams
 
 
 class RequestStatus(StrEnum):
+    """The status of a request in the scheduler."""
+
     WAITING = "waiting"
     PREFILL = "prefill"
     DECODING = "decoding"
@@ -33,6 +35,8 @@ class RequestStatus(StrEnum):
 
 @dataclass
 class Request:
+    """A single generation or encoding request."""
+
     request_id: str
     inputs: NormalizedInput
     sampling_params: SamplingParams

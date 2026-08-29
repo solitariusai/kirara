@@ -21,6 +21,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class OutputSampling:
+    """A single sampling output for a generation request."""
+
     text: str
     token_ids: list[int]
     num_tokens: int
@@ -29,6 +31,8 @@ class OutputSampling:
 
 @dataclass(frozen=True, slots=True)
 class Output:
+    """The full output for a generation request."""
+    
     prompt: str
     prompt_ids: list[int]
     output: list[OutputSampling]

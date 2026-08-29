@@ -26,6 +26,14 @@ from kirara.types import ModelSource
 
 
 def _detect(source: ModelSource) -> bool:
+    """Detects whether the provided model source is a TakTiny model.
+
+    Args:
+        source (ModelSource): The model source to evaluate.
+
+    Returns:
+        bool: True if the source is recognized as a TakTiny model instance, False otherwise.
+    """
     if isinstance(source, str):
         return False
     return hasattr(source, "paged_forward") or hasattr(source, "model")
@@ -36,6 +44,16 @@ def _create_adapter(
     attention_backend: AttentionBackend,
     runtime: AdapterRuntime,
 ) -> TakTinyAdapter:
+    """Creates a runtime adapter for a loaded TakTiny model.
+
+    Args:
+        loaded (LoadedModel): The loaded TakTiny model.
+        attention_backend (AttentionBackend): The attention backend to use during inference.
+        runtime (AdapterRuntime): Runtime parameters, including the block size for paged caching.
+
+    Returns:
+        TakTinyAdapter: The configured TakTiny adapter instance.
+    """
     return TakTinyAdapter(
         loaded.model,
         attention_backend,
@@ -44,6 +62,11 @@ def _create_adapter(
 
 
 def register(registry: ModelRegistry) -> None:
+    """Registers the TakTiny model integration with the registry.
+
+    Args:
+        registry (ModelRegistry): The target model registry.
+    """
     registry.register(
         "taktiny",
         loader=TakTinyLoader(),

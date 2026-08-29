@@ -24,7 +24,18 @@ from jax.sharding import Mesh
 
 
 def build_mesh(spec: Mesh | dict[str, int] | None) -> Mesh | None:
-    """Build a JAX mesh from axis sizes using the current device set."""
+    """Build a JAX mesh from axis sizes using the current device set.
+
+    Args:
+        spec: Mesh mapping or specification.
+
+    Raises:
+        ValueError: If mesh axis sizes are not positive.
+        ValueError: If the required devices don't match available JAX devices.
+
+    Returns:
+        The constructed JAX Mesh, or None if spec is None.
+    """
     if spec is None or isinstance(spec, Mesh):
         return spec
     if not spec or any(size < 1 for size in spec.values()):

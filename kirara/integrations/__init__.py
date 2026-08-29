@@ -20,6 +20,11 @@ from kirara.models.registry import ModelRegistry
 
 
 def register_builtin_integrations(registry: ModelRegistry) -> None:
+    """Registers all built-in model integrations with the given registry.
+
+    Args:
+        registry (ModelRegistry): The model registry to register integrations with.
+    """
     if "custom" not in registry.names():
         register_custom(registry)
     if "taktiny" not in registry.names():

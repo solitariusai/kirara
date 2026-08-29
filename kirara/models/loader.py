@@ -26,13 +26,17 @@ from kirara.types import Metadata, ModelDType, ModelKwargs, ModelSource
 
 @dataclass(slots=True)
 class LoadedModel:
+    """Result of loading a model, including tokenizer and processor."""
+
     model: Any
     tokenizer: Any = None
     processor: Any = None
     metadata: Metadata | None = None
 
 
-class ModelLoader(Protocol):
+class Loader(Protocol):
+    """Protocol for loading models from a given source."""
+    
     def load(
         self,
         source: ModelSource,
@@ -47,4 +51,4 @@ class ModelLoader(Protocol):
     ) -> LoadedModel: ...
 
 
-__all__ = ["LoadedModel", "ModelLoader"]
+__all__ = ["LoadedModel", "Loader"]

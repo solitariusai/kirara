@@ -40,6 +40,24 @@ class TakTinyLoader:
         trust_remote_code: bool,
         model_kwargs: ModelKwargs,
     ) -> LoadedModel:
+        """Loads a TakTiny model and its tokenizer from a source string or instance.
+
+        Args:
+            source (ModelSource): The model source string or instance.
+            dtype (ModelDType): The target data type.
+            revision (str | None): The model revision.
+            tokenizer (str | None): The tokenizer source string.
+            quantization (Any): The quantization configuration.
+            mesh (Mesh | None): The device mesh for parallelization.
+            trust_remote_code (bool): Whether to trust remote code.
+            model_kwargs (ModelKwargs): Additional model keyword arguments.
+
+        Raises:
+            ValueError: If model_kwargs are provided for an existing model instance.
+
+        Returns:
+            LoadedModel: The loaded model wrapper.
+        """
         if isinstance(source, str):
             kwargs = dict(model_kwargs)
             if revision is not None:
@@ -84,6 +102,16 @@ class TakTinyLoader:
         revision: str | None,
         trust_remote_code: bool,
     ) -> Any:
+        """Loads a Hugging Face tokenizer.
+
+        Args:
+            source (str): The tokenizer source repository or path.
+            revision (str | None): The model revision.
+            trust_remote_code (bool): Whether to trust remote code.
+
+        Returns:
+            Any: The loaded tokenizer instance.
+        """
         from transformers import AutoTokenizer
 
         return AutoTokenizer.from_pretrained(

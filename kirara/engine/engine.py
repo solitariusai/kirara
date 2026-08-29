@@ -37,13 +37,13 @@ class Engine:
         runner: Runner,
         scheduler: Scheduler,
     ) -> None:
-        """_summary_
+        """Initialize the Engine.
 
         Args:
-            model (Adapter): _description_
-            processor (InputProcessor): _description_
-            runner (Runner): _description_
-            scheduler (Scheduler): _description_
+            model (Adapter): The model adapter.
+            processor (InputProcessor): The input processor.
+            runner (Runner): The execution runner.
+            scheduler (Scheduler): The scheduler.
         """
         self.model = model
         self.processor = processor
@@ -55,6 +55,19 @@ class Engine:
         inputs: GenerationInput,
         sampling_params: SamplingParams | None = None,
     ) -> list[Output]:
+        """Generate text from the given inputs.
+
+        Args:
+            inputs (GenerationInput): The input prompts to generate from.
+            sampling_params (SamplingParams | None, optional): The sampling parameters. Defaults to None.
+
+        Raises:
+            ValueError: If the model does not support generation.
+            NotImplementedError: If text stop sequences are provided.
+
+        Returns:
+            list[Output]: A list of generation outputs.
+        """
         if not self.model.capabilities.generate:
             raise ValueError("model does not support generation")
         normalized = self.processor(inputs)
@@ -82,6 +95,18 @@ class Engine:
         ]
 
     def encode(self, inputs: GenerationInput) -> jax.Array:
+        """Encode the given inputs into embeddings.
+
+        Args:
+            inputs (GenerationInput): The inputs to encode.
+
+        Raises:
+            ValueError: If the model does not support encoding.
+            RuntimeError: If the encode adapter did not return embeddings.
+
+        Returns:
+            jax.Array: The computed embeddings.
+        """
         if not self.model.capabilities.encode:
             raise ValueError("model does not support encoding")
         normalized = self.processor(inputs)
@@ -115,6 +140,14 @@ class Engine:
         return output.embeddings
 
     def _validate_modalities(self, inputs: list[NormalizedInput]) -> None:
+        """Validate that the model supports the input modalities.
+
+        Args:
+            inputs (list[NormalizedInput]): The normalized inputs to check.
+
+        Raises:
+            ValueError: If the inputs contain modalities not supported by the model.
+        """
         has_modalities = any(item.modalities for item in inputs)
         if has_modalities and not self.model.capabilities.multimodal:
             raise ValueError("model does not support multimodal inputs")
@@ -124,6 +157,15 @@ class Engine:
         tokens: list[int],
         params: SamplingParams,
     ) -> str:
+        """Determine the reason for stopping generation.
+
+        Args:
+            tokens (list[int]): The generated tokens.
+            params (SamplingParams): The sampling parameters used.
+
+        Returns:
+            str: The stop reason ("stop" or "length").
+        """
         if (
             tokens
             and params.stop_token_ids is not None
