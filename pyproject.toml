@@ -5,8 +5,15 @@ description = "JAX inference runtime with continuous batching and paged KV cache
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "jax>=0.11.1",
     "taktiny",
+    "transformers>=5.16.1",
 ]
 
 [tool.uv.sources]
 taktiny = { git = "https://github.com/solitariusai/taktiny.git", rev = "experiment" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
