@@ -1,0 +1,12 @@
+[project]
+name = "kirara"
+version = "0.0.1"
+description = "JAX inference runtime with continuous batching and paged KV cache"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "taktiny",
+]
+
+[tool.uv.sources]
+taktiny = { git = "https://github.com/solitariusai/taktiny.git", rev = "experiment" }
