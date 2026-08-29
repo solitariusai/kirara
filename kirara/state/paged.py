@@ -1,11 +1,50 @@
+# Copyright 2026 Shinapri
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Authoritative paged KV state and physical block allocator."""
+
 from __future__ import annotations
 
 import heapq
 import math
+from dataclasses import dataclass
 from typing import Any
 
 import jax
 import jax.numpy as jnp
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass
+class PagedKVState:
+    key_pool: jax.Array
+    value_pool: jax.Array
+    block_table: jax.Array
+    sequence_lengths: jax.Array
+
+    def tree_flatten(self):
+        return (
+            self.key_pool,
+            self.value_pool,
+            self.block_table,
+            self.sequence_lengths,
+        ), None
+
+    @classmethod
+    def tree_unflatten(cls, auxiliary, children):
+        del auxiliary
+        return cls(*children)
 
 
 class PagedCacheManager:
@@ -74,6 +113,20 @@ class PagedCacheManager:
 
     def slot_blocks(self, slot_id: int) -> tuple[int, ...]:
         return tuple(self._slot_blocks[slot_id])
+
+    @property
+    def state(self) -> PagedKVState:
+        return PagedKVState(
+            key_pool=self.cache[0],
+            value_pool=self.cache[1],
+            block_table=self.block_table,
+            sequence_lengths=self.sequence_lengths,
+        )
+
+    def update_state(self, state: PagedKVState) -> None:
+        self.cache = (state.key_pool, state.value_pool)
+        self.block_table = state.block_table
+        self.sequence_lengths = state.sequence_lengths
 
     def ensure_position(self, slot_id: int, position: int) -> int:
         """Allocate the logical block containing ``position`` if necessary."""
@@ -180,3 +233,11 @@ def write_paged_kv(
         write_one,
         pool,
     )
+
+
+__all__ = [
+    "CacheManager",
+    "PagedCacheManager",
+    "PagedKVState",
+    "write_paged_kv",
+]
