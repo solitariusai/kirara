@@ -26,8 +26,8 @@ from kirara.inputs import InputPart, TokenizerInputProcessor
 from kirara.models import (
     Capabilities,
     LoadedModel,
-    ModelConfig,
-    ModelOutput,
+    Config,
+    Output,
     model_registry,
 )
 from kirara.sharding import build_mesh
@@ -50,7 +50,7 @@ class _Loader:
 
 
 class _EncoderAdapter:
-    config = ModelConfig(max_model_len=16, dtype=jnp.float32)
+    config = Config(max_model_len=16, dtype=jnp.float32)
     capabilities = Capabilities(encode=True)
     state_spec = None
     tokenizer = _Tokenizer()
@@ -58,7 +58,7 @@ class _EncoderAdapter:
     def __call__(self, batch, state=None):
         del state
         embeddings = jnp.sum(batch.input_ids, axis=-1, keepdims=True)
-        return ModelOutput(embeddings=embeddings)
+        return Output(embeddings=embeddings)
 
 
 def _adapter(loaded, attention_backend, runtime):
