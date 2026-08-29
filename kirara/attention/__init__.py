@@ -12,22 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Execution engine components and output structures."""
+"""Attention backend interfaces and implementations."""
 
-from kirara.engine.engine import Engine
-from kirara.engine.output import Output, OutputSampling
-from kirara.engine.request import Request, RequestStatus
-from kirara.engine.runner import Runner
-from kirara.engine.sampler import Sampler
-from kirara.engine.scheduler import Scheduler
+from kirara.attention.base import AttentionBackend, AttentionMetadata
+from kirara.attention.paged import PagedAttention, paged_attention
 
 __all__ = [
-    "Engine",
-    "Output",
-    "OutputSampling",
-    "Request",
-    "RequestStatus",
-    "Runner",
-    "Sampler",
-    "Scheduler",
+    "AttentionBackend",
+    "AttentionMetadata",
+    "PagedAttention",
+    "paged_attention",
 ]

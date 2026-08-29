@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.python-version
+
+# Local design notes and development entry point
+/api-graph/
+/change_log_local.md
+/PLAN.md
+/main.py

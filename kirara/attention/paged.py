@@ -1,7 +1,28 @@
+# Copyright 2026 Shinapri
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Paged causal attention over Kirara's authoritative KV state."""
+
 from __future__ import annotations
+
+from typing import Any
 
 import jax
 import jax.numpy as jnp
+
+from kirara.attention.base import AttentionMetadata
+from kirara.state import State
 
 
 def paged_attention(
@@ -19,8 +40,28 @@ def paged_attention(
 ) -> jax.Array:
     """Causal MHA/MQA/GQA over page tiles with a global score softmax.
 
-    Only one physical block is gathered per loop iteration.  A contiguous
+    Only one physical block is gathered per loop iteration. A contiguous
     per-request KV sequence is never constructed.
+
+    Args:
+        query (jax.Array): The query tensor [batch, q_len, q_heads, head_dim].
+        key_pool (jax.Array): The paged key cache [num_blocks, block_size, kv_heads, head_dim].
+        value_pool (jax.Array): The paged value cache [num_blocks, block_size, kv_heads, head_dim].
+        block_table (jax.Array): Logical-to-physical block mapping [batch, max_blocks].
+        sequence_lengths (jax.Array): Sequence length for each batch element.
+        query_positions (jax.Array): Positions of the query tokens.
+        query_active (jax.Array): Active mask for query tokens.
+        block_size (int): Number of tokens per block.
+        scale (float | None, optional): Attention scale factor. Defaults to head_dim**-0.5.
+        softcap (float | None, optional): Softcap value for attention scores. Defaults to None.
+
+    Raises:
+        ValueError: If query heads are not divisible by KV heads.
+        ValueError: If key and value pools have mismatched shapes.
+        ValueError: If block size does not match pool dimensions.
+
+    Returns:
+        jax.Array: The attention output tensor.
     """
     batch_size, query_length, query_heads, head_dim = query.shape
     kv_heads = key_pool.shape[2]
@@ -56,6 +97,7 @@ def paged_attention(
     mask_value = jnp.asarray(-1.0e30, dtype=jnp.float32)
 
     def score_block(logical_block, all_scores):
+        """Score a single logical block of the KV cache."""
         physical_ids = block_table[:, logical_block]
         safe_ids = jnp.maximum(physical_ids, 0)
         block_keys = key_pool[safe_ids]
@@ -106,6 +148,7 @@ def paged_attention(
     )
 
     def apply_value_block(logical_block, current_accumulator):
+        """Apply attention probabilities to a single logical block of values."""
         physical_ids = block_table[:, logical_block]
         safe_ids = jnp.maximum(physical_ids, 0)
         block_values = value_pool[safe_ids]
@@ -134,3 +177,50 @@ def paged_attention(
         0,
     )
     return output.astype(query.dtype)
+
+
+class PagedAttention:
+    """Initial Kirara attention backend over authoritative paged KV state."""
+
+    def __init__(self, block_size: int, **options: Any) -> None:
+        """Initialize the paged attention backend.
+
+        Args:
+            block_size (int): The number of tokens per KV cache block.
+            **options: Additional options for the attention calculation.
+        """
+        self.block_size = block_size
+        self.options = dict(options)
+
+    def __call__(
+        self,
+        query: jax.Array,
+        state: State,
+        metadata: AttentionMetadata,
+    ) -> jax.Array:
+        """Compute paged causal attention.
+
+        Args:
+            query (jax.Array): The query tensor.
+            state (State): The model state containing the paged KV cache.
+            metadata (AttentionMetadata): Metadata containing query positions and mask.
+
+        Returns:
+            jax.Array: The attention output tensor.
+        """
+        kv = state.kv
+        return paged_attention(
+            query,
+            kv.key_pool,
+            kv.value_pool,
+            kv.block_table,
+            kv.sequence_lengths,
+            metadata["query_positions"],
+            metadata["query_active"],
+            block_size=self.block_size,
+            scale=metadata.get("scale"),
+            softcap=metadata.get("softcap"),
+        )
+
+
+__all__ = ["PagedAttention", "paged_attention"]

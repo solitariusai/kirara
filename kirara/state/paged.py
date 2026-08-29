@@ -1,11 +1,52 @@
+# Copyright 2026 Shinapri
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Authoritative paged KV state and physical block allocator."""
+
 from __future__ import annotations
 
 import heapq
 import math
+from dataclasses import dataclass
 from typing import Any
 
 import jax
 import jax.numpy as jnp
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass
+class PagedKVState:
+    """Represents the authoritative device KV pool state for paged caching."""
+
+    key_pool: jax.Array
+    value_pool: jax.Array
+    block_table: jax.Array
+    sequence_lengths: jax.Array
+
+    def tree_flatten(self):
+        return (
+            self.key_pool,
+            self.value_pool,
+            self.block_table,
+            self.sequence_lengths,
+        ), None
+
+    @classmethod
+    def tree_unflatten(cls, auxiliary, children):
+        del auxiliary
+        return cls(*children)
 
 
 class PagedCacheManager:
@@ -22,6 +63,21 @@ class PagedCacheManager:
         block_size: int = 16,
         num_blocks: int | None = None,
     ) -> None:
+        """Initialize the paged cache manager.
+
+        Args:
+            max_batch_size (int): Maximum number of concurrent request slots.
+            max_seq_len (int): Maximum sequence length per slot.
+            num_layers (int): Number of attention layers.
+            num_heads (int): Number of attention heads per layer.
+            head_dim (int): Dimension of each attention head.
+            dtype (Any, optional): The data type for the KV cache. Defaults to jnp.float32.
+            block_size (int, optional): The number of tokens per page block. Defaults to 16.
+            num_blocks (int | None, optional): Total number of physical blocks. Defaults to None.
+
+        Raises:
+            ValueError: If block_size is less than 1 or num_blocks is less than max_batch_size.
+        """
         if block_size < 1:
             raise ValueError("block_size must be positive")
         self.max_batch_size = max_batch_size
@@ -70,13 +126,62 @@ class PagedCacheManager:
 
     @property
     def free_block_count(self) -> int:
+        """Get the number of available physical blocks.
+
+        Returns:
+            int: The count of free blocks.
+        """
         return len(self._free_blocks)
 
     def slot_blocks(self, slot_id: int) -> tuple[int, ...]:
+        """Get the list of allocated physical blocks for a given slot.
+
+        Args:
+            slot_id (int): The request slot ID.
+
+        Returns:
+            tuple[int, ...]: A tuple of physical block indices allocated to the slot.
+        """
         return tuple(self._slot_blocks[slot_id])
 
+    @property
+    def state(self) -> PagedKVState:
+        """Get the current paged KV state.
+
+        Returns:
+            PagedKVState: An object containing the current pools, block table, and sequence lengths.
+        """
+        return PagedKVState(
+            key_pool=self.cache[0],
+            value_pool=self.cache[1],
+            block_table=self.block_table,
+            sequence_lengths=self.sequence_lengths,
+        )
+
+    def update_state(self, state: PagedKVState) -> None:
+        """Update the internal cache state from a PagedKVState object.
+
+        Args:
+            state (PagedKVState): The new paged KV state.
+        """
+        self.cache = (state.key_pool, state.value_pool)
+        self.block_table = state.block_table
+        self.sequence_lengths = state.sequence_lengths
+
     def ensure_position(self, slot_id: int, position: int) -> int:
-        """Allocate the logical block containing ``position`` if necessary."""
+        """Allocate the logical block containing ``position`` if necessary.
+
+        Args:
+            slot_id (int): The request slot ID.
+            position (int): The sequence position to allocate.
+
+        Raises:
+            ValueError: If position is outside the allowed cache capacity.
+            RuntimeError: If the paged KV cache runs out of physical blocks.
+
+        Returns:
+            int: The physical block index for the requested position.
+        """
         if position < 0 or position >= self.max_seq_len:
             raise ValueError(
                 f"cache position {position} is outside [0, {self.max_seq_len})"
@@ -98,11 +203,29 @@ class PagedCacheManager:
         return blocks[logical_block]
 
     def ensure_length(self, slot_id: int, sequence_length: int) -> None:
+        """Ensure physical blocks are allocated for a given sequence length.
+
+        Args:
+            slot_id (int): The request slot ID.
+            sequence_length (int): The required sequence length.
+
+        Raises:
+            ValueError: If the sequence length is less than 1.
+        """
         if sequence_length < 1:
             raise ValueError("sequence_length must be positive")
         self.ensure_position(slot_id, sequence_length - 1)
 
     def set_sequence_length(self, slot_id: int, sequence_length: int) -> None:
+        """Set the sequence length for a given request slot.
+
+        Args:
+            slot_id (int): The request slot ID.
+            sequence_length (int): The current sequence length.
+
+        Raises:
+            ValueError: If the sequence length exceeds maximum cache capacity.
+        """
         if sequence_length < 0 or sequence_length > self.max_seq_len:
             raise ValueError("sequence length exceeds cache capacity")
         self.sequence_lengths = self.sequence_lengths.at[slot_id].set(
@@ -110,7 +233,11 @@ class PagedCacheManager:
         )
 
     def reset_slot(self, slot_id: int) -> None:
-        """Zero and release every physical block owned by one request."""
+        """Zero and release every physical block owned by one request.
+
+        Args:
+            slot_id (int): The request slot ID to reset.
+        """
         blocks = self._slot_blocks[slot_id]
         if blocks:
             block_ids = jnp.asarray(blocks, dtype=jnp.int32)
@@ -140,7 +267,19 @@ def write_paged_kv(
     token_active: jax.Array,
     block_size: int,
 ) -> jax.Array:
-    """Scatter ``[batch, query, heads, dim]`` updates into a page pool."""
+    """Scatter ``[batch, query, heads, dim]`` updates into a page pool.
+
+    Args:
+        pool (jax.Array): The paged KV pool array.
+        updates (jax.Array): The update values to scatter into the pool.
+        block_table (jax.Array): The block table mapping logical to physical blocks.
+        positions (jax.Array): The sequence positions for each token.
+        token_active (jax.Array): Boolean mask indicating active tokens.
+        block_size (int): The number of tokens per page block.
+
+    Returns:
+        jax.Array: The updated paged KV pool array.
+    """
     batch_size, query_length = positions.shape
     flat_updates = updates.reshape(
         batch_size * query_length,
@@ -180,3 +319,11 @@ def write_paged_kv(
         write_one,
         pool,
     )
+
+
+__all__ = [
+    "CacheManager",
+    "PagedCacheManager",
+    "PagedKVState",
+    "write_paged_kv",
+]

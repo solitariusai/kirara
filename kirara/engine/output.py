@@ -12,22 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Execution engine components and output structures."""
+"""Structured inference output values."""
 
-from kirara.engine.engine import Engine
-from kirara.engine.output import Output, OutputSampling
-from kirara.engine.request import Request, RequestStatus
-from kirara.engine.runner import Runner
-from kirara.engine.sampler import Sampler
-from kirara.engine.scheduler import Scheduler
+from __future__ import annotations
 
-__all__ = [
-    "Engine",
-    "Output",
-    "OutputSampling",
-    "Request",
-    "RequestStatus",
-    "Runner",
-    "Sampler",
-    "Scheduler",
-]
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class OutputSampling:
+    """A single sampling output for a generation request."""
+
+    text: str
+    token_ids: list[int]
+    num_tokens: int
+    stop_reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class Output:
+    """The full output for a generation request."""
+    
+    prompt: str
+    prompt_ids: list[int]
+    output: list[OutputSampling]
+
+
+__all__ = ["Output", "OutputSampling"]

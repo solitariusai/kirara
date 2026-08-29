@@ -1,11 +1,28 @@
+# Copyright 2026 Shinapri
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for batched prefill and decode scheduling invariants."""
+
 import unittest
 
 import jax
 import jax.numpy as jnp
 
-from kirara.cache import write_paged_kv
-from kirara.api.schemas import SamplingParams
-from kirara.engine import Request, Scheduler
+from kirara import LLM, SamplingParams
+from kirara.engine import Request, RequestStatus
+from kirara.inputs import NormalizedInput
+from kirara.state import write_paged_kv
 
 
 class _Config:
@@ -22,6 +39,17 @@ class _CacheWritingModel:
 
     config = _Config()
     vocab_size = 64
+
+    class tokenizer:
+        eos_token_id = None
+
+        @staticmethod
+        def encode(text):
+            return [ord(char) % 64 for char in text]
+
+        @staticmethod
+        def decode(token_ids):
+            return " ".join(map(str, token_ids))
 
     def paged_forward(
         self,
@@ -100,23 +128,31 @@ class _CacheWritingModel:
 
 def _request(request_id, tokens, slot_id):
     return Request(
-        request_id=request_id,
-        prompt_ids=tokens,
-        sampling_params=SamplingParams(max_new_tokens=1),
-        generated_tokens=[],
+        request_id=str(request_id),
+        inputs=NormalizedInput(input_ids=tokens),
+        sampling_params=SamplingParams(
+            temperature=0,
+            max_tokens=1,
+        ),
         slot_id=slot_id,
     )
 
 
 class BatchedPrefillTest(unittest.TestCase):
     def make_scheduler(self, **kwargs):
-        return Scheduler(
-            model=_CacheWritingModel(),
-            max_batch_size=4,
-            max_seq_len=64,
-            prefill_token_budget=128,
+        block_size = kwargs.pop("block_size", 16)
+        max_batched_tokens = kwargs.pop("max_num_batched_tokens", 128)
+        llm = LLM(
+            _CacheWritingModel(),
+            model_impl="taktiny",
+            max_num_seqs=4,
+            max_model_len=64,
+            max_num_batched_tokens=max_batched_tokens,
+            max_num_prefill_tokens=128,
+            block_size=block_size,
             **kwargs,
         )
+        return llm.scheduler
 
     def test_lengths_reuse_three_static_buckets(self):
         scheduler = self.make_scheduler()
@@ -130,7 +166,7 @@ class BatchedPrefillTest(unittest.TestCase):
         for length in lengths:
             scheduler.generate(
                 [[2] * length],
-                SamplingParams(max_new_tokens=1),
+                SamplingParams(temperature=0, max_tokens=1),
             )
 
         self.assertEqual(scheduler.compiled_prefill_buckets, {16, 32, 64})
@@ -139,7 +175,7 @@ class BatchedPrefillTest(unittest.TestCase):
     def test_four_requests_share_one_prefill_invocation(self):
         scheduler = self.make_scheduler()
         prompts = [[2] * length for length in (10, 15, 20, 25)]
-        sampling = SamplingParams(max_new_tokens=1)
+        sampling = SamplingParams(temperature=0, max_tokens=1)
         requests = [
             scheduler.add_request(prompt, sampling) for prompt in prompts
         ]
@@ -149,6 +185,23 @@ class BatchedPrefillTest(unittest.TestCase):
         self.assertEqual(scheduler.prefill_model_invocations, 1)
         self.assertEqual(scheduler.prefill_bucket_history, [32])
         self.assertEqual([request.slot_id for request in requests], [0, 1, 2, 3])
+
+    def test_total_batch_token_budget_limits_prefill_admission(self):
+        scheduler = self.make_scheduler(max_num_batched_tokens=64)
+        sampling = SamplingParams(temperature=0, max_tokens=1)
+        requests = [
+            scheduler.add_request([2] * length, sampling)
+            for length in (10, 15, 20, 25)
+        ]
+
+        scheduler.step()
+
+        self.assertEqual(scheduler.prefill_model_invocations, 1)
+        self.assertEqual(
+            [request.status for request in requests[:3]],
+            [RequestStatus.FINISHED] * 3,
+        )
+        self.assertIs(requests[3].status, RequestStatus.WAITING)
 
     def test_padding_cannot_mutate_cache_or_select_padding_logits(self):
         scheduler = self.make_scheduler()
@@ -177,7 +230,7 @@ class BatchedPrefillTest(unittest.TestCase):
             [request.generated_tokens for request in requests],
             [[8], [18]],
         )
-        self.assertEqual([request.pos for request in requests], [5, 8])
+        self.assertEqual([request.position for request in requests], [5, 8])
         self.assertEqual([request.slot_id for request in requests], [2, 3])
 
     def test_decode_batches_active_slots_and_preserves_inactive_cache(self):
@@ -195,12 +248,12 @@ class BatchedPrefillTest(unittest.TestCase):
 
         first = _request(0, [1, 2], 1)
         first.generated_tokens = [20]
-        first.pos = 5
-        first.status = "DECODE"
+        first.position = 5
+        first.status = RequestStatus.DECODING
         second = _request(1, [3, 4], 3)
         second.generated_tokens = [30]
-        second.pos = 8
-        second.status = "DECODE"
+        second.position = 8
+        second.status = RequestStatus.DECODING
         scheduler.slots[1] = first
         scheduler.slots[3] = second
 
@@ -219,14 +272,14 @@ class BatchedPrefillTest(unittest.TestCase):
         self.assertTrue(jnp.all(value[:, active_three, 8] == 30))
         self.assertEqual(first.generated_tokens, [20, 21])
         self.assertEqual(second.generated_tokens, [30, 31])
-        self.assertEqual([first.pos, second.pos], [6, 9])
+        self.assertEqual([first.position, second.position], [6, 9])
         self.assertEqual([first.slot_id, second.slot_id], [1, 3])
 
     def test_decode_uses_one_invocation_per_step_not_per_request(self):
         scheduler = self.make_scheduler()
         results = scheduler.generate(
             [[2] * length for length in (5, 6, 7, 8)],
-            SamplingParams(max_new_tokens=3),
+            SamplingParams(temperature=0, max_tokens=3),
         )
 
         self.assertEqual(scheduler.prefill_model_invocations, 1)
@@ -238,21 +291,33 @@ class BatchedPrefillTest(unittest.TestCase):
         scheduler = self.make_scheduler(block_size=4)
         short = scheduler.add_request(
             [2] * 4,
-            SamplingParams(max_new_tokens=2, eos_token_ids=[]),
+            SamplingParams(
+                temperature=0,
+                max_tokens=2,
+                stop_token_ids=[],
+            ),
         )
         long = scheduler.add_request(
             [3] * 4,
-            SamplingParams(max_new_tokens=6, eos_token_ids=[]),
+            SamplingParams(
+                temperature=0,
+                max_tokens=6,
+                stop_token_ids=[],
+            ),
         )
 
         scheduler.step()
-        self.assertEqual(short.status, "FINISHED")
+        self.assertIs(short.status, RequestStatus.FINISHED)
         self.assertEqual(long.slot_id, 1)
         self.assertEqual(scheduler.cache_manager.slot_blocks(0), ())
 
         replacement = scheduler.add_request(
             [4] * 4,
-            SamplingParams(max_new_tokens=4, eos_token_ids=[]),
+            SamplingParams(
+                temperature=0,
+                max_tokens=4,
+                stop_token_ids=[],
+            ),
         )
         scheduler.step()
         self.assertEqual(replacement.slot_id, 0)
@@ -262,8 +327,8 @@ class BatchedPrefillTest(unittest.TestCase):
         while scheduler.step():
             pass
 
-        self.assertEqual(long.status, "FINISHED")
-        self.assertEqual(replacement.status, "FINISHED")
+        self.assertIs(long.status, RequestStatus.FINISHED)
+        self.assertIs(replacement.status, RequestStatus.FINISHED)
         self.assertEqual(scheduler.compiled_prefill_buckets, {16})
         self.assertTrue(scheduler.decode_compiled)
         self.assertEqual(scheduler.compiled_executable_count, 2)

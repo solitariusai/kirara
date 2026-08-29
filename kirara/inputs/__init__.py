@@ -12,22 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Execution engine components and output structures."""
+"""Input processing contracts and public input types."""
 
-from kirara.engine.engine import Engine
-from kirara.engine.output import Output, OutputSampling
-from kirara.engine.request import Request, RequestStatus
-from kirara.engine.runner import Runner
-from kirara.engine.sampler import Sampler
-from kirara.engine.scheduler import Scheduler
+from kirara.inputs.processor import InputProcessor, TokenizerInputProcessor
+from kirara.inputs.types import (
+    GenerationInput,
+    InputPart,
+    NormalizedInput,
+    PromptInput,
+)
 
 __all__ = [
-    "Engine",
-    "Output",
-    "OutputSampling",
-    "Request",
-    "RequestStatus",
-    "Runner",
-    "Sampler",
-    "Scheduler",
+    "GenerationInput",
+    "InputPart",
+    "InputProcessor",
+    "NormalizedInput",
+    "PromptInput",
+    "TokenizerInputProcessor",
 ]

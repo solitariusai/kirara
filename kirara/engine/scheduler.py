@@ -1,418 +1,477 @@
+# Copyright 2026 Shinapri
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Continuous batching and request lifecycle scheduling."""
+
+from __future__ import annotations
+
 from collections import deque
-from dataclasses import dataclass
 from typing import Any
 
-import jax
 import jax.numpy as jnp
 
-from kirara.cache import PagedCacheManager
-from kirara.api.schemas import SamplingParams
-from kirara.models.taktiny import TakTinyModelRunner
-
-
-@dataclass
-class Request:
-    request_id: int
-    prompt_ids: list[int]
-    sampling_params: SamplingParams
-    generated_tokens: list[int]
-    status: str = "PENDING"
-    slot_id: int = -1
-    pos: int = 0
-
-    @property
-    def max_new_tokens(self) -> int:
-        return self.sampling_params.max_new_tokens
+from kirara.engine.request import Request, RequestStatus
+from kirara.engine.runner import Runner
+from kirara.engine.sampler import Sampler
+from kirara.inputs import NormalizedInput
+from kirara.models import Batch
+from kirara.sampling import SamplingParams
+from kirara.state import StateManager
+from kirara.types import SchedulerPolicy
 
 
 class Scheduler:
-    """Continuously batch prefill and decode over immutable cache slots."""
+    """Make request-level decisions without owning JAX compilation."""
 
     def __init__(
         self,
-        model: Any,
-        max_batch_size: int,
-        max_seq_len: int,
+        runner: Runner,
+        state_manager: StateManager,
+        sampler: Sampler,
+        *,
+        max_num_seqs: int,
+        max_model_len: int,
+        max_num_batched_tokens: int | None = None,
+        max_num_prefill_tokens: int | None = None,
         tokenizer: Any = None,
-        prefill_token_budget: int | None = None,
-        prefill_buckets: list[int] | None = None,
-        block_size: int = 16,
-        num_kv_blocks: int | None = None,
+        policy: SchedulerPolicy = "fcfs",
+        enable_chunked_prefill: bool = True,
+        enable_prefix_caching: bool = False,
     ) -> None:
-        self.model = model
-        self.max_batch_size = max_batch_size
-        self.max_seq_len = max_seq_len
-        self.tokenizer = tokenizer
-        # The prefill budget is the maximum prompt-token sum admitted at once.
-        if prefill_token_budget is None:
-            prefill_token_budget = max_seq_len
-        self.prefill_token_budget = int(prefill_token_budget)
-        if self.prefill_token_budget < 1:
-            raise ValueError("prefill_token_budget must be positive")
-        # Static powers-of-two buckets bound the number of JAX executables.
-        if prefill_buckets is None:
-            buckets = []
-            b = 16
-            while b < max_seq_len:
-                buckets.append(b)
-                b *= 2
-            buckets.append(max_seq_len)
-            self.prefill_buckets = sorted(set(buckets))
-        else:
-            self.prefill_buckets = sorted(set(prefill_buckets))
-        if not self.prefill_buckets or any(
-            bucket < 1 or bucket > max_seq_len
-            for bucket in self.prefill_buckets
-        ):
-            raise ValueError(
-                "prefill_buckets must contain values between 1 and max_seq_len"
-            )
+        """Initialize the scheduler for managing request lifecycles.
 
+        Args:
+            runner (Runner): The execution runner.
+            state_manager (StateManager): State manager for tracking sequence contexts.
+            sampler (Sampler): Token sampler.
+            max_num_seqs (int): Maximum number of concurrent sequences.
+            max_model_len (int): Maximum allowed sequence length.
+            max_num_batched_tokens (int | None, optional): Maximum tokens per batch. Defaults to max_model_len.
+            max_num_prefill_tokens (int | None, optional): Maximum tokens per prefill batch. Defaults to max_num_batched_tokens.
+            tokenizer (Any, optional): Tokenizer for resolving stop tokens. Defaults to None.
+            policy (SchedulerPolicy, optional): Scheduling policy. Defaults to "fcfs".
+            enable_chunked_prefill (bool, optional): Whether to enable chunked prefill. Defaults to True.
+            enable_prefix_caching (bool, optional): Whether to enable prefix caching. Defaults to False.
+
+        Raises:
+            ValueError: If policy is not 'fcfs'.
+            NotImplementedError: If prefix caching is enabled (not implemented).
+            ValueError: If max_num_batched_tokens is not positive.
+            ValueError: If max_num_prefill_tokens is not positive.
+        """
+        if policy != "fcfs":
+            raise ValueError("only fcfs scheduling is implemented")
+        if enable_prefix_caching:
+            raise NotImplementedError("prefix caching is not implemented")
+        self.runner = runner
+        self.state_manager = state_manager
+        self.sampler = sampler
+        self.max_num_seqs = max_num_seqs
+        self.max_model_len = max_model_len
+        self.max_num_batched_tokens = (
+            max_model_len
+            if max_num_batched_tokens is None
+            else max_num_batched_tokens
+        )
+        self.max_num_prefill_tokens = (
+            self.max_num_batched_tokens
+            if max_num_prefill_tokens is None
+            else max_num_prefill_tokens
+        )
+        if self.max_num_batched_tokens < 1:
+            raise ValueError("max_num_batched_tokens must be positive")
+        if self.max_num_prefill_tokens < 1:
+            raise ValueError("max_num_prefill_tokens must be positive")
+        self.tokenizer = tokenizer
+        self.policy = policy
+        self.enable_chunked_prefill = enable_chunked_prefill
         self.queue: deque[Request] = deque()
-        self.slots: list[Request | None] = [None] * max_batch_size
+        self.slots: list[Request | None] = [None] * max_num_seqs
         self.next_request_id = 0
 
-        # Initialize the one authoritative paged KV pool.
-        config = getattr(
-            self.model,
-            "config",
-            getattr(self.model, "_default_config", None),
-        )
-        if config is None:
-            raise TypeError(
-                "native Kirara models must expose config or _default_config"
-            )
-        num_layers = getattr(config, "num_hidden_layers", 32)
-        num_heads = (
-            getattr(config, "num_key_value_heads", None)
-            or getattr(config, "num_attention_heads", 32)
-        )
-        head_dim = getattr(config, "head_dim", None)
-        if head_dim is None:
-            hidden_size = getattr(config, "hidden_size", 4096)
-            attention_heads = getattr(config, "num_attention_heads", 32)
-            head_dim = hidden_size // attention_heads
-        dtype = getattr(
-            config,
-            "dtype",
-            getattr(config, "torch_dtype", jnp.float32),
-        )
-        if isinstance(dtype, str):
-            dtype = getattr(jnp, dtype, jnp.float32)
-        self.cache_manager = PagedCacheManager(
-            max_batch_size=max_batch_size,
-            max_seq_len=max_seq_len,
-            num_layers=num_layers,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            dtype=dtype,
-            block_size=block_size,
-            num_blocks=num_kv_blocks,
-        )
-        self.model_runner = TakTinyModelRunner(
-            self.model,
-            block_size=block_size,
-        )
+    @property
+    def cache_manager(self):
+        """Get the paged cache manager from the state manager.
 
-        # Useful both for observability and for verifying that the number of
-        # prefill executables stays bounded by ``prefill_buckets``.
-        self.prefill_model_invocations = 0
-        self.prefill_bucket_history: list[int] = []
-        self.compiled_prefill_buckets: set[int] = set()
-        self.decode_model_invocations = 0
-        self.decode_compiled = False
+        Returns:
+            PagedCache: The cache manager instance.
+        """
+        return self.state_manager.paged_cache
 
-        # JIT-compiled decode step function
-        self._compiled_decode_step = None
-        self._init_compiled_steps()
+    @property
+    def prefill_model_invocations(self) -> int:
+        """Get the total number of prefill model executions.
 
-    def _get_bucket_for_len(self, seq_len: int) -> int:
-        """Return the smallest configured static bucket containing seq_len."""
-        if seq_len < 1:
-            raise ValueError("prompts must contain at least one token")
-        for b in self.prefill_buckets:
-            if seq_len <= b:
-                return b
-        raise ValueError(
-            f"prompt length {seq_len} exceeds the largest prefill bucket "
-            f"({self.prefill_buckets[-1]})"
-        )
+        Returns:
+            int: The number of invocations.
+        """
+        return self.runner.prefill_model_invocations
+
+    @property
+    def prefill_bucket_history(self) -> list[int]:
+        """Get the history of prefill bucket sizes used.
+
+        Returns:
+            list[int]: The list of bucket sizes.
+        """
+        return self.runner.prefill_bucket_history
+
+    @property
+    def compiled_prefill_buckets(self) -> set[int]:
+        """Get the set of compiled prefill bucket sizes.
+
+        Returns:
+            set[int]: The compiled bucket sizes.
+        """
+        return self.runner.compiled_prefill_buckets
+
+    @property
+    def decode_model_invocations(self) -> int:
+        """Get the total number of decode model executions.
+
+        Returns:
+            int: The number of invocations.
+        """
+        return self.runner.decode_model_invocations
+
+    @property
+    def decode_compiled(self) -> bool:
+        """Check if the decode step has been compiled.
+
+        Returns:
+            bool: True if compiled, False otherwise.
+        """
+        return self.runner.decode_compiled
 
     @property
     def compiled_executable_count(self) -> int:
-        """Number of scheduler JIT executables materialized so far."""
-        return len(self.compiled_prefill_buckets) + int(self.decode_compiled)
+        """Get the total number of compiled JAX executables.
 
-    def _init_compiled_steps(self) -> None:
-        @jax.jit
-        def decode_step(
-            input_ids,
-            position_ids,
-            token_active,
-            block_table,
-            sequence_lengths,
-            key_pool,
-            value_pool,
-        ):
-            logits, updated_cache = self.model_runner(
-                input_ids,
-                position_ids,
-                token_active,
-                block_table,
-                sequence_lengths,
-                key_pool,
-                value_pool,
-                jnp.zeros((self.max_batch_size,), dtype=jnp.int32),
-            )
-            return logits, updated_cache
+        Returns:
+            int: The total count.
+        """
+        return self.runner.compiled_executable_count
 
-        self._compiled_decode_step = decode_step
-        self._compiled_prefill_steps = {}
+    @property
+    def _compiled_prefill_steps(self):
+        """Get the cached prefill steps.
+
+        Returns:
+            dict: Mapping of bucket sizes to executable prefill steps.
+        """
+        return self.runner._prefill_steps
+
+    def _get_bucket_for_len(self, length: int) -> int:
+        """Get the appropriate prefill bucket size for a given sequence length.
+
+        Args:
+            length (int): The sequence length.
+
+        Returns:
+            int: The bucket size.
+        """
+        return self.runner.bucket_for_length(length)
 
     def add_request(
         self,
-        input_ids: list[int],
+        inputs: NormalizedInput | list[int],
         sampling_params: SamplingParams | None = None,
     ) -> Request:
-        self._get_bucket_for_len(len(input_ids))
-        parameters = sampling_params or SamplingParams()
-        req = Request(
-            request_id=self.next_request_id,
-            prompt_ids=list(input_ids),
-            sampling_params=parameters,
-            generated_tokens=[],
+        """Add a new request to the scheduler queue.
+
+        Args:
+            inputs (NormalizedInput | list[int]): The input tokens or normalized input.
+            sampling_params (SamplingParams | None, optional): The sampling configuration. Defaults to None.
+
+        Returns:
+            Request: The constructed request object.
+        """
+        normalized = (
+            inputs
+            if isinstance(inputs, NormalizedInput)
+            else NormalizedInput(input_ids=list(inputs))
         )
-        self.queue.append(req)
+        self._get_bucket_for_len(len(normalized.input_ids))
+        request = Request(
+            request_id=str(self.next_request_id),
+            inputs=normalized,
+            sampling_params=sampling_params or SamplingParams(),
+        )
+        self.queue.append(request)
         self.next_request_id += 1
-        return req
-
-    def _is_eos(self, req: Request) -> bool:
-        if not req.generated_tokens:
-            return False
-        last_tok = req.generated_tokens[-1]
-
-        eos_ids = req.sampling_params.eos_token_ids
-        if (
-            eos_ids is None
-            and self.tokenizer is not None
-            and hasattr(self.tokenizer, "eos_token_id")
-        ):
-            eos_ids = self.tokenizer.eos_token_id
-
-        if eos_ids is None:
-            return False
-
-        if isinstance(eos_ids, int):
-            return last_tok == eos_ids
-        if isinstance(eos_ids, (list, tuple, set)):
-            return last_tok in eos_ids
-        return False
+        return request
 
     def step(self) -> bool:
-        """Perform one scheduling step.
+        """Execute one scheduling step, running prefill or decode batches as needed.
 
-        1. Allocates available slots to queued requests and runs batched prefill
-            (single model invocation per batch, respecting token budget).
-        2. Decodes all active requests in one fixed-shape model invocation.
-        3. Retires finished requests and clears their slots.
+        Returns:
+            bool: True if there are still active or queued requests, False otherwise.
         """
-        # 1. Fill empty slots with pending requests and run batched prefill
-        # Respect prefill_token_budget: sum of prompt tokens in this batch
-        prefill_reqs: list[Request] = []
-        total_prefill_tokens = 0
-        for s in range(self.max_batch_size):
-            if self.slots[s] is None and self.queue:
-                peek = self.queue[0]
-                peek_len = len(peek.prompt_ids)
-                # If adding this would exceed budget and we already have some, stop
-                if (
-                    prefill_reqs
-                    and total_prefill_tokens + peek_len
-                    > self.prefill_token_budget
-                ):
-                    break
-                # Also handle single huge prompt that exceeds budget: still admit one
-                req = self.queue.popleft()
-                req.slot_id = s
-                req.status = "PREFILL"
-                self.slots[s] = req
-                prefill_reqs.append(req)
-                total_prefill_tokens += peek_len
+        prefill_requests = self._admit_prefill()
+        prefill_tokens = sum(
+            request.prompt_length for request in prefill_requests
+        )
+        if prefill_requests:
+            self._run_batched_prefill(prefill_requests)
+            self._retire_finished(prefill_requests)
 
-        if prefill_reqs:
-            self._run_batched_prefill(prefill_reqs)
-
-            # Check if prompt prefill generated all requested tokens or eos
-            for req in prefill_reqs:
-                if len(req.generated_tokens) >= req.max_new_tokens or self._is_eos(req):
-                    req.status = "FINISHED"
-                    if self.cache_manager is not None:
-                        self.cache_manager.reset_slot(req.slot_id)
-                    self.slots[req.slot_id] = None
-
-        # 2. Decode for all active slots
         active_slots = [
             slot_id
             for slot_id, request in enumerate(self.slots)
-            if request is not None and request.status == "DECODE"
+            if request is not None
+            and request.status is RequestStatus.DECODING
         ]
+        decode_budget = max(
+            self.max_num_batched_tokens - prefill_tokens,
+            0,
+        )
+        active_slots = active_slots[:decode_budget]
         if active_slots:
             self._run_decode(active_slots)
+            active_requests = [
+                self.slots[slot_id]
+                for slot_id in active_slots
+                if self.slots[slot_id] is not None
+            ]
+            self._retire_finished(active_requests)
 
-            # Check for finished requests
-            for s in active_slots:
-                req = self.slots[s]
-                if req is not None and (
-                    len(req.generated_tokens) >= req.max_new_tokens
-                    or self._is_eos(req)
-                ):
-                    req.status = "FINISHED"
-                    if self.cache_manager is not None:
-                        self.cache_manager.reset_slot(s)
-                    self.slots[s] = None
-
-        # Check if there are any remaining requests
-        has_active = any(s is not None for s in self.slots)
-        has_queued = bool(self.queue)
-        return has_active or has_queued
-
-    def _get_compiled_prefill_step(self, bucket_size: int):
-        """Return the one compiled prefill executable for ``bucket_size``.
-
-        Bucket size is represented only by array shapes.  Prompt lengths stay
-        dynamic array values, so prompts within a bucket share an executable.
-        """
-        if bucket_size not in self._compiled_prefill_steps:
-            @jax.jit
-            def prefill_step(
-                input_ids: jax.Array,
-                position_ids: jax.Array,
-                token_active: jax.Array,
-                prompt_lengths: jax.Array,
-                block_table: jax.Array,
-                key_pool: jax.Array,
-                value_pool: jax.Array,
-            ):
-                return self.model_runner(
-                    input_ids,
-                    position_ids,
-                    token_active,
-                    block_table,
-                    prompt_lengths,
-                    key_pool,
-                    value_pool,
-                    jnp.maximum(prompt_lengths, 1) - 1,
-                )
-
-            self._compiled_prefill_steps[bucket_size] = prefill_step
-        return self._compiled_prefill_steps[bucket_size]
-
-    def _run_batched_prefill(self, reqs: list[Request]) -> None:
-        if self.cache_manager is None:
-            for req in reqs:
-                req.generated_tokens.append(1)
-                req.pos = len(req.prompt_ids) + 1
-                req.status = "DECODE"
-            return
-
-        # Determine bucket for the batch (finite set)
-        max_prompt_len = max(len(req.prompt_ids) for req in reqs)
-        bucket_size = self._get_bucket_for_len(max_prompt_len)
-
-        # All arrays have one of a finite set of shapes.  Rows are indexed by
-        # immutable cache slot IDs rather than by admission order.
-        shape = (self.max_batch_size, bucket_size)
-        input_batch = jnp.zeros(shape, dtype=jnp.int32)
-        position_batch = jnp.zeros(shape, dtype=jnp.int32)
-        token_active = jnp.zeros(shape, dtype=jnp.bool_)
-        prompt_lengths = jnp.zeros((self.max_batch_size,), dtype=jnp.int32)
-
-        for req in reqs:
-            s = req.slot_id
-            seq_len = len(req.prompt_ids)
-            prompt_ids = jnp.asarray(req.prompt_ids, dtype=jnp.int32)
-            input_batch = input_batch.at[s, :seq_len].set(prompt_ids)
-            pos = jnp.arange(seq_len, dtype=jnp.int32)
-            position_batch = position_batch.at[s, :seq_len].set(pos)
-            token_active = token_active.at[s, :seq_len].set(True)
-            prompt_lengths = prompt_lengths.at[s].set(seq_len)
-            self.cache_manager.ensure_length(s, seq_len)
-            self.cache_manager.set_sequence_length(s, seq_len)
-
-        # Inactive rows use index zero only for the irrelevant logit gather;
-        # their cache write mask remains empty.  Admitted rows gather the real
-        # last prompt token, never the bucket's padded tail.
-        prefill_step = self._get_compiled_prefill_step(bucket_size)
-        logits, updated_cache = prefill_step(
-            input_batch,
-            position_batch,
-            token_active,
-            prompt_lengths,
-            self.cache_manager.block_table,
-            self.cache_manager.cache[0],
-            self.cache_manager.cache[1],
-        )
-        self.cache_manager.cache = updated_cache
-        self.prefill_model_invocations += 1
-        self.prefill_bucket_history.append(bucket_size)
-        self.compiled_prefill_buckets.add(bucket_size)
-
-        first_tokens = jax.device_get(jnp.argmax(logits[:, 0, :], axis=-1))
-        for req in reqs:
-            req.generated_tokens.append(int(first_tokens[req.slot_id]))
-            req.pos = len(req.prompt_ids)
-            req.status = "DECODE"
-
-    def _run_decode(self, active_slots: list[int]) -> None:
-        if self.cache_manager is None:
-            for s in active_slots:
-                req = self.slots[s]
-                req.generated_tokens.append(1)
-                req.pos += 1
-            return
-
-        # The batch shape never depends on the number or identity of active
-        # slots, so occupancy changes reuse the same compiled executable.
-        input_batch = jnp.zeros((self.max_batch_size, 1), dtype=jnp.int32)
-        pos_batch = jnp.zeros((self.max_batch_size, 1), dtype=jnp.int32)
-        token_active = jnp.zeros((self.max_batch_size, 1), dtype=jnp.bool_)
-        for s in active_slots:
-            req = self.slots[s]
-            input_batch = input_batch.at[s, 0].set(req.generated_tokens[-1])
-            pos_batch = pos_batch.at[s, 0].set(req.pos)
-            token_active = token_active.at[s, 0].set(True)
-            self.cache_manager.ensure_position(s, req.pos)
-            self.cache_manager.set_sequence_length(s, req.pos + 1)
-
-        logits, updated_cache = self._compiled_decode_step(
-            input_batch,
-            pos_batch,
-            token_active,
-            self.cache_manager.block_table,
-            self.cache_manager.sequence_lengths,
-            self.cache_manager.cache[0],
-            self.cache_manager.cache[1],
-        )
-        self.cache_manager.cache = updated_cache
-        self.decode_model_invocations += 1
-        self.decode_compiled = True
-
-        next_tokens = jax.device_get(jnp.argmax(logits[:, 0, :], axis=-1))
-        for s in active_slots:
-            req = self.slots[s]
-            req.generated_tokens.append(int(next_tokens[s]))
-            req.pos += 1
+        return bool(self.queue) or any(self.slots)
 
     def generate(
         self,
-        input_ids_list: list[list[int]],
+        inputs: list[NormalizedInput] | list[list[int]],
         sampling_params: SamplingParams | None = None,
     ) -> list[list[int]]:
-        """Generate token IDs for a batch of pretokenized prompts."""
+        """Synchronously generate tokens for a batch of inputs until completion.
+
+        Args:
+            inputs (list[NormalizedInput] | list[list[int]]): The inputs to process.
+            sampling_params (SamplingParams | None, optional): The sampling configuration. Defaults to None.
+
+        Returns:
+            list[list[int]]: The generated token sequences for each input.
+        """
         requests = [
-            self.add_request(input_ids, sampling_params)
-            for input_ids in input_ids_list
+            self.add_request(item, sampling_params)
+            for item in inputs
         ]
         while self.step():
             pass
         return [request.generated_tokens for request in requests]
+
+    def _admit_prefill(self) -> list[Request]:
+        """Admit queued requests for the prefill phase based on budget.
+
+        Raises:
+            ValueError: If a prompt exceeds the token budget without chunked prefill enabled.
+            NotImplementedError: If chunked prefill is required but not yet implemented.
+
+        Returns:
+            list[Request]: The list of requests admitted for prefill.
+        """
+        admitted: list[Request] = []
+        total_tokens = 0
+        prefill_budget = min(
+            self.max_num_prefill_tokens,
+            self.max_num_batched_tokens,
+        )
+        for slot_id in range(self.max_num_seqs):
+            if self.slots[slot_id] is not None or not self.queue:
+                continue
+            request = self.queue[0]
+            prompt_tokens = request.prompt_length
+            if (
+                admitted
+                and total_tokens + prompt_tokens
+                > prefill_budget
+            ):
+                break
+            if prompt_tokens > prefill_budget:
+                if not self.enable_chunked_prefill:
+                    raise ValueError("prompt exceeds prefill token budget")
+                raise NotImplementedError(
+                    "chunked prefill scheduling is not implemented yet"
+                )
+            request = self.queue.popleft()
+            request.slot_id = slot_id
+            request.status = RequestStatus.PREFILL
+            self.slots[slot_id] = request
+            admitted.append(request)
+            total_tokens += prompt_tokens
+        return admitted
+
+    def _run_batched_prefill(self, requests: list[Request]) -> None:
+        """Execute a batched prefill step for the given requests.
+
+        Args:
+            requests (list[Request]): The requests to prefill.
+
+        Raises:
+            RuntimeError: If the generation adapter does not return logits.
+        """
+        max_prompt_length = max(request.prompt_length for request in requests)
+        bucket = self._get_bucket_for_len(max_prompt_length)
+        shape = (self.max_num_seqs, bucket)
+        input_ids = jnp.zeros(shape, dtype=jnp.int32)
+        positions = jnp.zeros(shape, dtype=jnp.int32)
+        active_mask = jnp.zeros(shape, dtype=jnp.bool_)
+        prompt_lengths = jnp.zeros((self.max_num_seqs,), dtype=jnp.int32)
+
+        for request in requests:
+            slot_id = self._slot_id(request)
+            length = request.prompt_length
+            tokens = jnp.asarray(request.inputs.input_ids, dtype=jnp.int32)
+            input_ids = input_ids.at[slot_id, :length].set(tokens)
+            positions = positions.at[slot_id, :length].set(
+                jnp.arange(length, dtype=jnp.int32)
+            )
+            active_mask = active_mask.at[slot_id, :length].set(True)
+            prompt_lengths = prompt_lengths.at[slot_id].set(length)
+            self.state_manager.ensure_length(slot_id, length)
+            self.state_manager.set_sequence_length(slot_id, length)
+
+        output = self.runner.execute(
+            Batch(
+                input_ids=input_ids,
+                positions=positions,
+                slot_ids=jnp.arange(self.max_num_seqs, dtype=jnp.int32),
+                active_mask=active_mask,
+                metadata={
+                    "logit_indices": jnp.maximum(prompt_lengths, 1) - 1,
+                },
+            ),
+            phase="prefill",
+        )
+        if output.logits is None:
+            raise RuntimeError("generation adapter did not return logits")
+        rows = [self._slot_id(request) for request in requests]
+        tokens = self.sampler.sample(
+            output.logits[:, 0, :],
+            rows,
+            [request.sampling_params for request in requests],
+            [0] * len(requests),
+        )
+        for request, token in zip(requests, tokens, strict=True):
+            request.generated_tokens.append(token)
+            request.position = request.prompt_length
+            request.status = RequestStatus.DECODING
+
+    def _run_decode(self, active_slots: list[int]) -> None:
+        """Execute a batched decode step for the given active slots.
+
+        Args:
+            active_slots (list[int]): The slot indices of active decoding requests.
+
+        Raises:
+            RuntimeError: If the generation adapter does not return logits.
+        """
+        input_ids = jnp.zeros((self.max_num_seqs, 1), dtype=jnp.int32)
+        positions = jnp.zeros((self.max_num_seqs, 1), dtype=jnp.int32)
+        active_mask = jnp.zeros((self.max_num_seqs, 1), dtype=jnp.bool_)
+        requests: list[Request] = []
+        for slot_id in active_slots:
+            request = self.slots[slot_id]
+            if request is None:
+                continue
+            requests.append(request)
+            input_ids = input_ids.at[slot_id, 0].set(
+                request.generated_tokens[-1]
+            )
+            positions = positions.at[slot_id, 0].set(request.position)
+            active_mask = active_mask.at[slot_id, 0].set(True)
+            self.state_manager.ensure_position(slot_id, request.position)
+            self.state_manager.set_sequence_length(
+                slot_id,
+                request.position + 1,
+            )
+
+        output = self.runner.execute(
+            Batch(
+                input_ids=input_ids,
+                positions=positions,
+                slot_ids=jnp.arange(self.max_num_seqs, dtype=jnp.int32),
+                active_mask=active_mask,
+                metadata={
+                    "logit_indices": jnp.zeros(
+                        (self.max_num_seqs,),
+                        dtype=jnp.int32,
+                    ),
+                },
+            ),
+            phase="decode",
+        )
+        if output.logits is None:
+            raise RuntimeError("generation adapter did not return logits")
+        tokens = self.sampler.sample(
+            output.logits[:, 0, :],
+            active_slots,
+            [request.sampling_params for request in requests],
+            [len(request.generated_tokens) for request in requests],
+        )
+        for request, token in zip(requests, tokens, strict=True):
+            request.generated_tokens.append(token)
+            request.position += 1
+
+    def _retire_finished(self, requests: list[Request]) -> None:
+        """Retire and clean up resources for finished requests.
+
+        Args:
+            requests (list[Request]): The requests to check and retire.
+        """
+        for request in requests:
+            if not self._is_finished(request):
+                continue
+            request.status = RequestStatus.FINISHED
+            slot_id = self._slot_id(request)
+            self.state_manager.reset_slot(slot_id)
+            self.slots[slot_id] = None
+
+    def _is_finished(self, request: Request) -> bool:
+        """Check if a request has finished generation.
+
+        Args:
+            request (Request): The request to check.
+
+        Returns:
+            bool: True if generation is complete, False otherwise.
+        """
+        if len(request.generated_tokens) >= request.sampling_params.max_tokens:
+            return True
+        if not request.generated_tokens:
+            return False
+        stop_ids = request.sampling_params.stop_token_ids
+        if stop_ids is None and self.tokenizer is not None:
+            eos_id = getattr(self.tokenizer, "eos_token_id", None)
+            stop_ids = [eos_id] if eos_id is not None else None
+        return stop_ids is not None and request.generated_tokens[-1] in stop_ids
+
+    @staticmethod
+    def _slot_id(request: Request) -> int:
+        """Retrieve the slot ID for a request.
+
+        Args:
+            request (Request): The request to inspect.
+
+        Raises:
+            RuntimeError: If the request has no assigned slot.
+
+        Returns:
+            int: The slot ID.
+        """
+        if request.slot_id is None:
+            raise RuntimeError("request has no assigned slot")
+        return request.slot_id
+
+
+__all__ = ["Scheduler"]
