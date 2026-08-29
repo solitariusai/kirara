@@ -1,7 +1,28 @@
+# Copyright 2026 Shinapri
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Paged causal attention over Kirara's authoritative KV state."""
+
 from __future__ import annotations
+
+from typing import Any
 
 import jax
 import jax.numpy as jnp
+
+from kirara.attention.base import AttentionMetadata
+from kirara.state import State
 
 
 def paged_attention(
@@ -134,3 +155,34 @@ def paged_attention(
         0,
     )
     return output.astype(query.dtype)
+
+
+class PagedAttention:
+    """Initial Kirara attention backend over authoritative paged KV state."""
+
+    def __init__(self, block_size: int, **options: Any) -> None:
+        self.block_size = block_size
+        self.options = dict(options)
+
+    def __call__(
+        self,
+        query: jax.Array,
+        state: State,
+        metadata: AttentionMetadata,
+    ) -> jax.Array:
+        kv = state.kv
+        return paged_attention(
+            query,
+            kv.key_pool,
+            kv.value_pool,
+            kv.block_table,
+            kv.sequence_lengths,
+            metadata["query_positions"],
+            metadata["query_active"],
+            block_size=self.block_size,
+            scale=metadata.get("scale"),
+            softcap=metadata.get("softcap"),
+        )
+
+
+__all__ = ["PagedAttention", "paged_attention"]
