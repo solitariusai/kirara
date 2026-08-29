@@ -12,33 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model contracts, loading, and registry exports."""
+"""Input processor selection for TakTiny models."""
 
-from kirara.models.base import (
-    Adapter,
-    Batch,
-    Capabilities,
-    ModelConfig,
-    ModelOutput,
-    ModelStateSpec,
-)
-from kirara.models.loader import LoadedModel, ModelLoader
-from kirara.models.registry import (
-    AdapterRuntime,
-    ModelRegistry,
-    model_registry,
-)
+from kirara.inputs import InputProcessor, TokenizerInputProcessor
+from kirara.models.loader import LoadedModel
 
-__all__ = [
-    "Adapter",
-    "AdapterRuntime",
-    "Batch",
-    "Capabilities",
-    "LoadedModel",
-    "ModelConfig",
-    "ModelLoader",
-    "ModelOutput",
-    "ModelRegistry",
-    "ModelStateSpec",
-    "model_registry",
-]
+
+def create_processor(loaded: LoadedModel) -> InputProcessor:
+    if loaded.processor is not None:
+        return loaded.processor
+    if loaded.tokenizer is None:
+        raise ValueError(
+            "TakTiny text generation requires a tokenizer or processor"
+        )
+    return TokenizerInputProcessor(loaded.tokenizer)
+
+
+__all__ = ["create_processor"]

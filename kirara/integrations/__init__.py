@@ -12,33 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model contracts, loading, and registry exports."""
+"""Registration of built-in model integrations."""
 
-from kirara.models.base import (
-    Adapter,
-    Batch,
-    Capabilities,
-    ModelConfig,
-    ModelOutput,
-    ModelStateSpec,
-)
-from kirara.models.loader import LoadedModel, ModelLoader
-from kirara.models.registry import (
-    AdapterRuntime,
-    ModelRegistry,
-    model_registry,
-)
+from kirara.integrations.custom import register as register_custom
+from kirara.integrations.taktiny import register as register_taktiny
+from kirara.models.registry import ModelRegistry
 
-__all__ = [
-    "Adapter",
-    "AdapterRuntime",
-    "Batch",
-    "Capabilities",
-    "LoadedModel",
-    "ModelConfig",
-    "ModelLoader",
-    "ModelOutput",
-    "ModelRegistry",
-    "ModelStateSpec",
-    "model_registry",
-]
+
+def register_builtin_integrations(registry: ModelRegistry) -> None:
+    if "custom" not in registry.names():
+        register_custom(registry)
+    if "taktiny" not in registry.names():
+        register_taktiny(registry)
+
+
+__all__ = ["register_builtin_integrations"]
