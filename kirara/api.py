@@ -139,6 +139,7 @@ class LLM:
             max_model_len=self.max_model_len,
             cache_dtype=cache_dtype,
             block_size=block_size,
+            enable_prefix_caching=enable_prefix_caching,
         )
         self.runner = Runner(
             model=self.adapter,
@@ -212,14 +213,16 @@ class LLM:
         max_model_len: int,
         cache_dtype: CacheDType,
         block_size: int,
+        enable_prefix_caching: bool,
     ) -> StateManager:
-        """Create a state manager for the KV cache.
+        """Create paged and per-slot persistent model state.
 
         Args:
             max_num_seqs (int): Maximum number of sequences.
             max_model_len (int): Maximum model length.
             cache_dtype (CacheDType): Data type for the cache.
             block_size (int): Block size for paged attention.
+            enable_prefix_caching (bool): Retain reusable paged prompt prefixes.
 
         Raises:
             ValueError: If the adapter requires layer, KV-head, and head sizes but they are invalid.
@@ -229,32 +232,63 @@ class LLM:
             StateManager: The created state manager.
         """
         state_spec = self.adapter.state_spec
-        if state_spec is None or "kv" not in state_spec.kinds:
+        if state_spec is None:
+            if enable_prefix_caching:
+                raise ValueError("prefix caching requires paged KV state")
             return StateManager()
         config = self.adapter.config
-        if min(
-            config.num_layers,
-            config.num_kv_heads,
-            config.head_dim,
-        ) < 1:
-            raise ValueError(
-                "paged-state adapters require layer, KV-head, and head sizes"
-            )
         dtype = config.dtype if cache_dtype == "auto" else cache_dtype
+        if dtype is None and cache_dtype == "auto":
+            dtype = jnp.float32
         if isinstance(dtype, str):
             dtype = getattr(jnp, dtype, None)
         if dtype is None:
             raise ValueError(f"unsupported cache dtype: {cache_dtype}")
-        cache = PagedCacheManager(
-            max_batch_size=max_num_seqs,
-            max_seq_len=max_model_len,
-            num_layers=config.num_layers,
-            num_heads=config.num_kv_heads,
-            head_dim=config.head_dim,
-            dtype=dtype,
-            block_size=block_size,
+        cache = None
+        if "kv" in state_spec.kinds:
+            if min(
+                config.num_layers,
+                config.num_kv_heads,
+                config.head_dim,
+            ) < 1:
+                raise ValueError(
+                    "paged-state adapters require layer, KV-head, and head sizes"
+                )
+            cache = PagedCacheManager(
+                max_batch_size=max_num_seqs,
+                max_seq_len=max_model_len,
+                num_layers=config.num_layers,
+                num_heads=config.num_kv_heads,
+                head_dim=config.head_dim,
+                dtype=dtype,
+                block_size=block_size,
+            )
+
+        slot_state: dict[str, jax.Array] = {}
+        for kind in state_spec.kinds:
+            if kind == "kv":
+                continue
+            try:
+                shape = state_spec.shapes[kind]
+            except KeyError as error:
+                raise ValueError(
+                    f"persistent state {kind!r} requires a static shape"
+                ) from error
+            state_dtype = state_spec.dtypes.get(kind, dtype)
+            slot_state[kind] = jnp.zeros(
+                (max_num_seqs, *shape),
+                dtype=state_dtype,
+            )
+        if enable_prefix_caching and slot_state:
+            raise ValueError(
+                "prefix caching currently requires pure paged KV state; "
+                "recurrent prefix snapshots need model-level scan outputs"
+            )
+        return StateManager(
+            paged_cache=cache,
+            slot_state=slot_state,
+            enable_prefix_caching=enable_prefix_caching,
         )
-        return StateManager(paged_cache=cache)
 
     @staticmethod
     def _resolve_attention_backend(

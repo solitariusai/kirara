@@ -14,7 +14,11 @@
 
 """Input processing contracts and public input types."""
 
-from kirara.inputs.processor import InputProcessor, TokenizerInputProcessor
+from kirara.inputs.processor import (
+    InputProcessor,
+    TokenizerInputProcessor,
+    collate_modalities,
+)
 from kirara.inputs.types import (
     GenerationInput,
     InputPart,
@@ -29,4 +33,5 @@ __all__ = [
     "NormalizedInput",
     "PromptInput",
     "TokenizerInputProcessor",
+    "collate_modalities",
 ]

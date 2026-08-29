@@ -46,6 +46,10 @@ class CustomLoader:
         if isinstance(source, str):
             raise TypeError("custom integration requires a model instance")
         model_kwargs = kwargs.get("model_kwargs") or {}
+        if kwargs.get("quantization") is not None:
+            raise ValueError(
+                "custom model instances must apply Qwix before constructing LLM"
+            )
         if model_kwargs:
             raise ValueError(
                 "model_kwargs cannot modify an existing model instance"

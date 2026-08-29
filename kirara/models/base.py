@@ -35,6 +35,7 @@ class Batch:
     slot_ids: jax.Array | None = None
     active_mask: jax.Array | None = None
     modalities: Metadata | None = None
+    modality_mask: Metadata | None = None
     metadata: Metadata | None = None
 
     def tree_flatten(self):
@@ -44,6 +45,7 @@ class Batch:
             self.slot_ids,
             self.active_mask,
             self.modalities,
+            self.modality_mask,
             self.metadata,
         )
         return children, None
@@ -81,6 +83,8 @@ class StateSpec:
     """Structural description of persistent model state."""
 
     kinds: tuple[str, ...] = ()
+    shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    dtypes: dict[str, ModelDType] = field(default_factory=dict)
     metadata: Metadata = field(default_factory=dict)
 
 

@@ -22,7 +22,12 @@ import jax.numpy as jnp
 from kirara.engine.output import Output, OutputSampling
 from kirara.engine.runner import Runner
 from kirara.engine.scheduler import Scheduler
-from kirara.inputs import GenerationInput, InputProcessor, NormalizedInput
+from kirara.inputs import (
+    GenerationInput,
+    InputProcessor,
+    NormalizedInput,
+    collate_modalities,
+)
 from kirara.models import Adapter, Batch
 from kirara.sampling import SamplingParams
 
@@ -127,11 +132,17 @@ class Engine:
                 jnp.asarray(item.input_ids, dtype=jnp.int32)
             )
             active = active.at[row, :length].set(True)
+        modalities, modality_mask = collate_modalities(
+            list(enumerate(normalized)),
+            len(normalized),
+        )
         output = self.runner.execute(
             Batch(
                 input_ids=input_ids,
                 positions=positions,
                 active_mask=active,
+                modalities=modalities,
+                modality_mask=modality_mask,
             ),
             phase="encode",
         )

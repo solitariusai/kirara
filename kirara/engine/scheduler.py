@@ -21,10 +21,10 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from kirara.engine.request import Request, RequestStatus
+from kirara.engine.request import PrefillChunk, Request, RequestStatus
 from kirara.engine.runner import Runner
 from kirara.engine.sampler import Sampler
-from kirara.inputs import NormalizedInput
+from kirara.inputs import NormalizedInput, collate_modalities
 from kirara.models import Batch
 from kirara.sampling import SamplingParams
 from kirara.state import StateManager
@@ -66,14 +66,11 @@ class Scheduler:
 
         Raises:
             ValueError: If policy is not 'fcfs'.
-            NotImplementedError: If prefix caching is enabled (not implemented).
             ValueError: If max_num_batched_tokens is not positive.
             ValueError: If max_num_prefill_tokens is not positive.
         """
         if policy != "fcfs":
             raise ValueError("only fcfs scheduling is implemented")
-        if enable_prefix_caching:
-            raise NotImplementedError("prefix caching is not implemented")
         self.runner = runner
         self.state_manager = state_manager
         self.sampler = sampler
@@ -96,9 +93,11 @@ class Scheduler:
         self.tokenizer = tokenizer
         self.policy = policy
         self.enable_chunked_prefill = enable_chunked_prefill
+        self.enable_prefix_caching = enable_prefix_caching
         self.queue: deque[Request] = deque()
         self.slots: list[Request | None] = [None] * max_num_seqs
         self.next_request_id = 0
+        self.prefill_token_history: list[int] = []
 
     @property
     def cache_manager(self):
@@ -218,13 +217,13 @@ class Scheduler:
         Returns:
             bool: True if there are still active or queued requests, False otherwise.
         """
-        prefill_requests = self._admit_prefill()
-        prefill_tokens = sum(
-            request.prompt_length for request in prefill_requests
-        )
-        if prefill_requests:
-            self._run_batched_prefill(prefill_requests)
-            self._retire_finished(prefill_requests)
+        prefill_chunks = self._admit_prefill()
+        prefill_tokens = sum(chunk.length for chunk in prefill_chunks)
+        if prefill_chunks:
+            self._run_batched_prefill(prefill_chunks)
+            self._retire_finished(
+                [chunk.request for chunk in prefill_chunks]
+            )
 
         active_slots = [
             slot_id
@@ -270,76 +269,130 @@ class Scheduler:
             pass
         return [request.generated_tokens for request in requests]
 
-    def _admit_prefill(self) -> list[Request]:
+    def _admit_prefill(self) -> list[PrefillChunk]:
         """Admit queued requests for the prefill phase based on budget.
 
         Raises:
             ValueError: If a prompt exceeds the token budget without chunked prefill enabled.
-            NotImplementedError: If chunked prefill is required but not yet implemented.
-
         Returns:
-            list[Request]: The list of requests admitted for prefill.
+            list[PrefillChunk]: Prompt ranges scheduled for this step.
         """
-        admitted: list[Request] = []
+        scheduled: list[PrefillChunk] = []
         total_tokens = 0
         prefill_budget = min(
             self.max_num_prefill_tokens,
             self.max_num_batched_tokens,
         )
+        for request in self.slots:
+            if request is None or request.status is not RequestStatus.PREFILL:
+                continue
+            remaining = request.prompt_length - request.prefill_position
+            if remaining <= 0:
+                continue
+            chunk_length = min(remaining, prefill_budget - total_tokens)
+            if chunk_length <= 0:
+                break
+            if chunk_length < remaining and not self.enable_chunked_prefill:
+                break
+            scheduled.append(
+                PrefillChunk(
+                    request,
+                    request.prefill_position,
+                    request.prefill_position + chunk_length,
+                )
+            )
+            total_tokens += chunk_length
+
         for slot_id in range(self.max_num_seqs):
-            if self.slots[slot_id] is not None or not self.queue:
+            if total_tokens >= prefill_budget or not self.queue:
+                break
+            if self.slots[slot_id] is not None:
                 continue
             request = self.queue[0]
             prompt_tokens = request.prompt_length
-            if (
-                admitted
-                and total_tokens + prompt_tokens
-                > prefill_budget
-            ):
-                break
+            available = prefill_budget - total_tokens
             if prompt_tokens > prefill_budget:
                 if not self.enable_chunked_prefill:
                     raise ValueError("prompt exceeds prefill token budget")
-                raise NotImplementedError(
-                    "chunked prefill scheduling is not implemented yet"
-                )
+                chunk_length = available
+            elif prompt_tokens > available:
+                break
+            else:
+                chunk_length = prompt_tokens
             request = self.queue.popleft()
             request.slot_id = slot_id
             request.status = RequestStatus.PREFILL
             self.slots[slot_id] = request
-            admitted.append(request)
-            total_tokens += prompt_tokens
-        return admitted
+            request.prefill_position = self.state_manager.restore_prefix(
+                slot_id,
+                request.inputs.input_ids,
+            )
+            remaining = request.prompt_length - request.prefill_position
+            chunk_length = min(chunk_length, remaining)
+            scheduled.append(
+                PrefillChunk(
+                    request,
+                    request.prefill_position,
+                    request.prefill_position + chunk_length,
+                )
+            )
+            total_tokens += chunk_length
+        return scheduled
 
-    def _run_batched_prefill(self, requests: list[Request]) -> None:
+    def _run_batched_prefill(
+        self,
+        work: list[PrefillChunk] | list[Request],
+    ) -> None:
         """Execute a batched prefill step for the given requests.
 
         Args:
-            requests (list[Request]): The requests to prefill.
+            work: Requests or explicit prompt ranges to prefill.
 
         Raises:
             RuntimeError: If the generation adapter does not return logits.
         """
-        max_prompt_length = max(request.prompt_length for request in requests)
-        bucket = self._get_bucket_for_len(max_prompt_length)
+        chunks = [
+            item
+            if isinstance(item, PrefillChunk)
+            else PrefillChunk(item, item.prefill_position, item.prompt_length)
+            for item in work
+        ]
+        self.prefill_token_history.append(
+            sum(chunk.length for chunk in chunks)
+        )
+        bucket = self._get_bucket_for_len(
+            max(chunk.length for chunk in chunks)
+        )
         shape = (self.max_num_seqs, bucket)
         input_ids = jnp.zeros(shape, dtype=jnp.int32)
         positions = jnp.zeros(shape, dtype=jnp.int32)
         active_mask = jnp.zeros(shape, dtype=jnp.bool_)
-        prompt_lengths = jnp.zeros((self.max_num_seqs,), dtype=jnp.int32)
+        chunk_lengths = jnp.zeros((self.max_num_seqs,), dtype=jnp.int32)
 
-        for request in requests:
+        for chunk in chunks:
+            request = chunk.request
             slot_id = self._slot_id(request)
-            length = request.prompt_length
-            tokens = jnp.asarray(request.inputs.input_ids, dtype=jnp.int32)
+            length = chunk.length
+            tokens = jnp.asarray(
+                request.inputs.input_ids[chunk.start:chunk.end],
+                dtype=jnp.int32,
+            )
             input_ids = input_ids.at[slot_id, :length].set(tokens)
             positions = positions.at[slot_id, :length].set(
-                jnp.arange(length, dtype=jnp.int32)
+                jnp.arange(chunk.start, chunk.end, dtype=jnp.int32)
             )
             active_mask = active_mask.at[slot_id, :length].set(True)
-            prompt_lengths = prompt_lengths.at[slot_id].set(length)
-            self.state_manager.ensure_length(slot_id, length)
-            self.state_manager.set_sequence_length(slot_id, length)
+            chunk_lengths = chunk_lengths.at[slot_id].set(length)
+            self.state_manager.ensure_length(slot_id, chunk.end)
+            self.state_manager.set_sequence_length(slot_id, chunk.end)
+
+        modalities, modality_mask = collate_modalities(
+            [
+                (self._slot_id(chunk.request), chunk.request.inputs)
+                for chunk in chunks
+            ],
+            self.max_num_seqs,
+        )
 
         output = self.runner.execute(
             Batch(
@@ -347,22 +400,37 @@ class Scheduler:
                 positions=positions,
                 slot_ids=jnp.arange(self.max_num_seqs, dtype=jnp.int32),
                 active_mask=active_mask,
+                modalities=modalities,
+                modality_mask=modality_mask,
                 metadata={
-                    "logit_indices": jnp.maximum(prompt_lengths, 1) - 1,
+                    "logit_indices": jnp.maximum(chunk_lengths, 1) - 1,
                 },
             ),
             phase="prefill",
         )
+        completed: list[Request] = []
+        for chunk in chunks:
+            request = chunk.request
+            request.prefill_position = chunk.end
+            self.state_manager.publish_prefix(
+                self._slot_id(request),
+                request.inputs.input_ids,
+                request.prefill_position,
+            )
+            if request.prefill_position == request.prompt_length:
+                completed.append(request)
+        if not completed:
+            return
         if output.logits is None:
             raise RuntimeError("generation adapter did not return logits")
-        rows = [self._slot_id(request) for request in requests]
+        rows = [self._slot_id(request) for request in completed]
         tokens = self.sampler.sample(
             output.logits[:, 0, :],
             rows,
-            [request.sampling_params for request in requests],
-            [0] * len(requests),
+            [request.sampling_params for request in completed],
+            [0] * len(completed),
         )
-        for request, token in zip(requests, tokens, strict=True):
+        for request, token in zip(completed, tokens, strict=True):
             request.generated_tokens.append(token)
             request.position = request.prompt_length
             request.status = RequestStatus.DECODING
@@ -396,12 +464,22 @@ class Scheduler:
                 request.position + 1,
             )
 
+        modalities, modality_mask = collate_modalities(
+            [
+                (self._slot_id(request), request.inputs)
+                for request in requests
+            ],
+            self.max_num_seqs,
+        )
+
         output = self.runner.execute(
             Batch(
                 input_ids=input_ids,
                 positions=positions,
                 slot_ids=jnp.arange(self.max_num_seqs, dtype=jnp.int32),
                 active_mask=active_mask,
+                modalities=modalities,
+                modality_mask=modality_mask,
                 metadata={
                     "logit_indices": jnp.zeros(
                         (self.max_num_seqs,),

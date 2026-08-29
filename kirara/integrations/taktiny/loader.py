@@ -21,6 +21,7 @@ from typing import Any
 from jax.sharding import Mesh
 from taktiny import Maestro
 
+from kirara.integrations.qwix import validate_qwix_config
 from kirara.models.loader import LoadedModel
 from kirara.types import ModelDType, ModelKwargs, ModelSource
 
@@ -59,6 +60,7 @@ class TakTinyLoader:
             LoadedModel: The loaded model wrapper.
         """
         if isinstance(source, str):
+            quantization = validate_qwix_config(quantization)
             kwargs = dict(model_kwargs)
             if revision is not None:
                 kwargs["revision"] = revision
@@ -80,9 +82,19 @@ class TakTinyLoader:
             return LoadedModel(
                 model=model,
                 tokenizer=tokenizer_instance,
-                metadata={"source": source},
+                metadata={
+                    "source": source,
+                    "quantization": (
+                        "qwix" if quantization is not None else None
+                    ),
+                },
             )
 
+        if quantization is not None:
+            raise ValueError(
+                "Qwix quantization is a load-time transformation and cannot "
+                "be applied to an existing TakTiny model instance"
+            )
         if model_kwargs:
             raise ValueError(
                 "model_kwargs only apply when loading a model source"

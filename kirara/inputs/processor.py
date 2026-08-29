@@ -18,7 +18,10 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+import jax.numpy as jnp
+
 from kirara.inputs.types import GenerationInput, InputPart, NormalizedInput
+from kirara.types import Metadata
 
 
 class InputProcessor(Protocol):
@@ -198,4 +201,50 @@ def _extract_token_ids(result: Any) -> list[int]:
     return list(input_ids)
 
 
-__all__ = ["InputProcessor", "TokenizerInputProcessor"]
+def collate_modalities(
+    rows: list[tuple[int, NormalizedInput]],
+    batch_size: int,
+) -> tuple[Metadata | None, Metadata | None]:
+    """Stack processor-produced modality tensors by immutable runtime slot.
+
+    Every value for a modality key must have the same static shape and dtype.
+    Missing rows are represented by zeros plus a runtime boolean mask.
+    """
+    keys = sorted({key for _, row in rows for key in row.modalities})
+    if not keys:
+        return None, None
+
+    modalities: Metadata = {}
+    masks: Metadata = {}
+    for key in keys:
+        present = [
+            (slot_id, jnp.asarray(row.modalities[key]))
+            for slot_id, row in rows
+            if key in row.modalities
+        ]
+        template = present[0][1]
+        if any(
+            value.shape != template.shape or value.dtype != template.dtype
+            for _, value in present[1:]
+        ):
+            raise ValueError(
+                f"modality {key!r} must have one static shape and dtype"
+            )
+        batched = jnp.zeros(
+            (batch_size, *template.shape),
+            dtype=template.dtype,
+        )
+        active = jnp.zeros((batch_size,), dtype=jnp.bool_)
+        for slot_id, value in present:
+            batched = batched.at[slot_id].set(value)
+            active = active.at[slot_id].set(True)
+        modalities[key] = batched
+        masks[key] = active
+    return modalities, masks
+
+
+__all__ = [
+    "InputProcessor",
+    "TokenizerInputProcessor",
+    "collate_modalities",
+]

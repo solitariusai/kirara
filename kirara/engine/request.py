@@ -42,6 +42,7 @@ class Request:
     sampling_params: SamplingParams
     slot_id: int | None = None
     prompt_length: int = 0
+    prefill_position: int = 0
     position: int = 0
     generated_tokens: list[int] = field(default_factory=list)
     status: RequestStatus = RequestStatus.WAITING
@@ -51,4 +52,17 @@ class Request:
             self.prompt_length = len(self.inputs.input_ids)
 
 
-__all__ = ["Request", "RequestStatus"]
+@dataclass(frozen=True, slots=True)
+class PrefillChunk:
+    """A contiguous prompt range scheduled for one model invocation."""
+
+    request: Request
+    start: int
+    end: int
+
+    @property
+    def length(self) -> int:
+        return self.end - self.start
+
+
+__all__ = ["PrefillChunk", "Request", "RequestStatus"]

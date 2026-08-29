@@ -21,6 +21,20 @@ outputs = llm.generate(
 )
 ```
 
+Qwix rules are applied by the selected model integration while weights load:
+
+```python
+import jax.numpy as jnp
+import qwix
+
+rule = qwix.QuantizationRule(weight_qtype=jnp.int8)
+llm = LLM("HuggingFaceTB/SmolLM2-135M", quantization=rule)
+```
+
+Kirara passes Qwix objects through unchanged. TakTiny performs the actual
+weight transformation and also recognizes its Qwix dtype shortcuts such as
+`"int8"` and `"int4"`. Existing model instances must already be quantized.
+
 An existing model instance is also accepted when a registered integration can
 adapt it. An object that already implements Kirara's adapter contract is
 recognized directly and does not need to inherit from a Kirara class.
@@ -49,13 +63,21 @@ precise contracts without expanding the package-root API.
 - authoritative paged KV state and lifecycle management;
 - scheduler-owned request decisions and Runner-owned JIT executables;
 - fixed decode compilation and bounded prefill/encoder buckets;
+- budgeted chunked prefill over absolute prompt positions;
+- reference-counted LRU prefix caching over authoritative KV pages;
 - paged attention for MHA, GQA, and MQA;
+- static multimodal tensor collation with per-slot modality masks;
+- persistent recurrent/convolution state with inactive-slot protection;
+- native Qwix load-time quantization through the TakTiny integration;
 - JAX `Mesh`, logical-axis, and `NamedSharding` helpers;
 - request-specific sampling parameters.
 
-Prefix caching, completed chunked-prefill scheduling, MaxText, Qwix, and
-optimized Pallas kernels remain future integrations. Unsupported requested
-features fail explicitly.
+Model-specific processors remain responsible for turning images, audio, or
+video into fixed-shape JAX tensors. Recurrent adapters declare their persistent
+per-slot arrays through `StateSpec`. Prefix caching currently applies to pure
+paged-KV state; Kirara rejects recurrent/KV hybrid prefix caching rather than
+restoring incomplete state. MaxText and optimized Pallas kernels remain future
+integrations; unsupported requested features fail explicitly.
 
 ## Test
 

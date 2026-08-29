@@ -16,7 +16,7 @@
 
 from kirara.engine.engine import Engine
 from kirara.engine.output import Output, OutputSampling
-from kirara.engine.request import Request, RequestStatus
+from kirara.engine.request import PrefillChunk, Request, RequestStatus
 from kirara.engine.runner import Runner
 from kirara.engine.sampler import Sampler
 from kirara.engine.scheduler import Scheduler
@@ -25,6 +25,7 @@ __all__ = [
     "Engine",
     "Output",
     "OutputSampling",
+    "PrefillChunk",
     "Request",
     "RequestStatus",
     "Runner",

@@ -148,7 +148,7 @@ class Runner:
             raise ValueError(f"unknown execution phase: {phase}")
 
         if output.state is not None:
-            self.state_manager.update(output.state)
+            self.state_manager.update(output.state, batch.active_mask)
         return output
 
     def _call_model(self, batch: Batch, state: State) -> Output:

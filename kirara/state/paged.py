@@ -123,6 +123,7 @@ class PagedCacheManager:
         ]
         self._free_blocks = list(range(self.num_blocks))
         heapq.heapify(self._free_blocks)
+        self._block_refcounts = [0] * self.num_blocks
 
     @property
     def free_block_count(self) -> int:
@@ -143,6 +144,10 @@ class PagedCacheManager:
             tuple[int, ...]: A tuple of physical block indices allocated to the slot.
         """
         return tuple(self._slot_blocks[slot_id])
+
+    def block_refcount(self, block_id: int) -> int:
+        """Return the number of slot and prefix owners of a physical block."""
+        return self._block_refcounts[block_id]
 
     @property
     def state(self) -> PagedKVState:
@@ -188,10 +193,12 @@ class PagedCacheManager:
             )
         logical_block = position // self.block_size
         blocks = self._slot_blocks[slot_id]
+        needed = logical_block + 1 - len(blocks)
+        if needed > len(self._free_blocks):
+            raise RuntimeError("paged KV cache is out of physical blocks")
         while len(blocks) <= logical_block:
-            if not self._free_blocks:
-                raise RuntimeError("paged KV cache is out of physical blocks")
             physical_block = heapq.heappop(self._free_blocks)
+            self._block_refcounts[physical_block] = 1
             blocks.append(physical_block)
             table_index = len(blocks) - 1
             self.block_table = self.block_table.at[
@@ -201,6 +208,54 @@ class PagedCacheManager:
             slot_id
         ].set(len(blocks))
         return blocks[logical_block]
+
+    def attach_blocks(
+        self,
+        slot_id: int,
+        physical_blocks: tuple[int, ...],
+    ) -> None:
+        """Attach immutable cached prefix blocks to an empty request slot."""
+        if self._slot_blocks[slot_id]:
+            raise ValueError("prefix blocks require an empty request slot")
+        if len(physical_blocks) > self.max_blocks_per_sequence:
+            raise ValueError("prefix exceeds the slot block-table capacity")
+        for block_id in physical_blocks:
+            if self._block_refcounts[block_id] < 1:
+                raise RuntimeError("cannot attach an unowned physical block")
+            self._block_refcounts[block_id] += 1
+        self._slot_blocks[slot_id] = list(physical_blocks)
+        if physical_blocks:
+            self.block_table = self.block_table.at[
+                slot_id, : len(physical_blocks)
+            ].set(jnp.asarray(physical_blocks, dtype=jnp.int32))
+        self.allocated_block_count = self.allocated_block_count.at[
+            slot_id
+        ].set(len(physical_blocks))
+
+    def retain_blocks(self, physical_blocks: tuple[int, ...]) -> None:
+        """Add a non-slot owner, such as a prefix-cache entry."""
+        for block_id in physical_blocks:
+            if self._block_refcounts[block_id] < 1:
+                raise RuntimeError("cannot retain an unowned physical block")
+            self._block_refcounts[block_id] += 1
+
+    def release_blocks(self, physical_blocks: tuple[int, ...]) -> None:
+        """Release owners and recycle blocks whose last owner disappears."""
+        freed: list[int] = []
+        for block_id in physical_blocks:
+            if self._block_refcounts[block_id] < 1:
+                raise RuntimeError("physical block reference count underflow")
+            self._block_refcounts[block_id] -= 1
+            if self._block_refcounts[block_id] == 0:
+                freed.append(block_id)
+        if freed:
+            block_ids = jnp.asarray(freed, dtype=jnp.int32)
+            self.cache = (
+                self.cache[0].at[:, block_ids].set(0),
+                self.cache[1].at[:, block_ids].set(0),
+            )
+            for block_id in freed:
+                heapq.heappush(self._free_blocks, block_id)
 
     def ensure_length(self, slot_id: int, sequence_length: int) -> None:
         """Ensure physical blocks are allocated for a given sequence length.
@@ -240,13 +295,7 @@ class PagedCacheManager:
         """
         blocks = self._slot_blocks[slot_id]
         if blocks:
-            block_ids = jnp.asarray(blocks, dtype=jnp.int32)
-            self.cache = (
-                self.cache[0].at[:, block_ids].set(0),
-                self.cache[1].at[:, block_ids].set(0),
-            )
-            for block_id in blocks:
-                heapq.heappush(self._free_blocks, block_id)
+            self.release_blocks(tuple(blocks))
         self._slot_blocks[slot_id] = []
         self.block_table = self.block_table.at[slot_id].set(-1)
         self.sequence_lengths = self.sequence_lengths.at[slot_id].set(0)
